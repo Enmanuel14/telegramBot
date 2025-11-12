@@ -30,8 +30,10 @@ WEBHOOK_URL = os.environ.get('WEB_URL', '')
 # El token debe configurarse en Railway como TELEGRAM_BOT_TOKEN
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "TU_TOKEN_DE_BOT_AQUI")
 # La clave debe configurarse en Railway como GEMINI_API_KEY
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") 
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
+# --- CONFIGURACIÓN DE GEMINI ---
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+
 
 # --- PROMPTS Y CONSEJOS ESPECÍFICOS ---
 SYSTEM_PROMPT = """Eres un psicólogo virtual llamado PazOhrBot. Tu objetivo es proporcionar apoyo, consejos de bienestar emocional y mantener una conversación empática y confidencial. Responde de forma cálida, reflexiva y en español. Mantente enfocado en el bienestar del usuario. Responde de forma concisa, no más de 4 oraciones. Eres de Nicaragua."""
@@ -160,11 +162,10 @@ async def generate_gemini_response(prompt: str, user_id: str) -> str:
     ]
 
     payload_main = {
-        "contents": content_list, 
-        "config": {
-            "systemInstruction": SYSTEM_PROMPT
-        }
-    }
+    "contents": content_list,
+    "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]}
+}
+
 
     # 3. LLAMADA PRINCIPAL A GEMINI
     reply_text = await call_gemini_api(payload_main)
@@ -180,10 +181,10 @@ async def generate_gemini_response(prompt: str, user_id: str) -> str:
         anxiety_prompt_filled = ANSIEDAD_PROMPT.format(user_text=prompt)
         
         anxiety_payload = {
-            "contents": [{'role': 'user', 'parts': [{'text': anxiety_prompt_filled}]}],
-            "config": {
-                "systemInstruction": "Eres un clasificador de emociones. Responde SOLAMENTE 'ANSIEDAD' o 'OTRO'."
-            }
+    "contents": [{'role': 'user', 'parts': [{'text': anxiety_prompt_filled}]}],
+    "system_instruction": {"parts": [{"text": "Eres un clasificador de emociones. Responde SOLAMENTE 'ANSIEDAD' o 'OTRO'."}]}
+}
+
         }
         
         # Llamada para detectar emoción
@@ -313,3 +314,4 @@ def main() -> None:
         
 if __name__ == "__main__":
     main()
+
