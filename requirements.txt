@@ -1,5 +1,5 @@
 google-genai
 python-telegram-bot
 aiohttp
-python-telegram-bot[webhooks]==20.8
 python-dotenv
+python-telegram-bot[webhooks]==20.8
