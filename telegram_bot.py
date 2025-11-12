@@ -32,7 +32,8 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "TU_TOKEN_DE_BOT_AQUI")
 # La clave debe configurarse en Railway como GEMINI_API_KEY
 # --- CONFIGURACIÓN DE GEMINI ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
+
 
 
 # --- PROMPTS Y CONSEJOS ESPECÍFICOS ---
@@ -314,5 +315,6 @@ def main() -> None:
         
 if __name__ == "__main__":
     main()
+
 
 
