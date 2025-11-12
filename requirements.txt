@@ -1,6 +1,5 @@
-google-genai
+google-genai==0.1.0
 python-telegram-bot[webhooks]==20.7
 aiohttp==3.9.5
 python-dotenv==1.0.1
 httpx
-
