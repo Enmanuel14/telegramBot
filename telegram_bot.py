@@ -183,7 +183,7 @@ async def generate_gemini_response(prompt: str, user_id: str) -> str:
         anxiety_payload = {
     "contents": [{'role': 'user', 'parts': [{'text': anxiety_prompt_filled}]}],
     "system_instruction": {"parts": [{"text": "Eres un clasificador de emociones. Responde SOLAMENTE 'ANSIEDAD' o 'OTRO'."}]}
-}
+
 
         }
         
@@ -314,4 +314,5 @@ def main() -> None:
         
 if __name__ == "__main__":
     main()
+
 
