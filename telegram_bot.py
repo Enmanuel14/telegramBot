@@ -4,7 +4,8 @@ import logging
 import asyncio
 import random
 from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+# Importar CommandHandler para manejar el comando /start
+from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
 import httpx # Se recomienda usar 'httpx' o 'aiohttp' para llamadas asíncronas en producción
 
 # --- CONFIGURACIÓN DE LOGGING ---
@@ -18,6 +19,13 @@ CONSEJO_INTERVALO = 5  # Dar consejo cada 5 mensajes.
 HISTORY_FILE = 'telegram_chat_history.json' # Archivo para almacenar historial/contador
 FIRST_MESSAGE_KEY = "is_first_message" # Clave para detectar el primer mensaje
 
+# --- CONFIGURACIÓN DE WEBHOOK (NECESARIA PARA RAILWAY) ---
+# Se obtienen del entorno de Railway
+PORT = int(os.environ.get('PORT', 8080))
+# La URL de Railway se genera automáticamente con un formato específico
+WEBHOOK_URL = os.environ.get('WEB_URL', '') 
+
+
 # --- VARIABLES DE ENTORNO ---
 # El token debe configurarse en Railway como TELEGRAM_BOT_TOKEN
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "TU_TOKEN_DE_BOT_AQUI")
@@ -26,13 +34,13 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
 
 # --- PROMPTS Y CONSEJOS ESPECÍFICOS ---
-SYSTEM_PROMPT = """Eres un psicólogo virtual llamado PazOhrBot. Tu objetivo es proporcionar apoyo, consejos de bienestar emocional y mantener una conversación empática y confidencial. Responde de forma cálida, reflexiva y en español. Mantente enfocado en el bienestar del usuario. Responde de forma concisa, no más de 4 oraciones - Eres de Nicaragua."""
+SYSTEM_PROMPT = """Eres un psicólogo virtual llamado PazOhrBot. Tu objetivo es proporcionar apoyo, consejos de bienestar emocional y mantener una conversación empática y confidencial. Responde de forma cálida, reflexiva y en español. Mantente enfocado en el bienestar del usuario. Responde de forma concisa, no más de 4 oraciones. Eres de Nicaragua."""
 
 # Prompt para que Gemini evalúe la emoción (solo debe responder ANSIEDAD o OTRO)
 ANSIEDAD_PROMPT = "Analiza el siguiente texto: '{user_text}'. Si el tono principal es de ansiedad, estrés, o preocupación intensa, responde SOLAMENTE con la palabra 'ANSIEDAD'. En cualquier otro caso (tristeza, felicidad, aburrimiento, etc.), responde SOLAMENTE con la palabra 'OTRO'."
 
 CONSEJOS_ANSIEDAD = [
-    f"""**Técnica de la Respiración 4-4-6:** Siente tu cuerpo tenso. Ahora, inhala lentamente contando hasta 4, mantén el aire 4 segundos, y exhala contando hasta 6. Esto calma el sistema nervioso. [Image of diaphragmatic breathing technique]""",
+    f"""**Técnica de la Respiración 4-4-6:** Siente tu cuerpo tenso. Ahora, inhala lentamente contando hasta 4, mantén el aire 4 segundos, y exhala contando hasta 6. Esto calma el sistema nervioso. """,
     """**Anclaje a la Realidad (5-4-3-2-1):** Cuando la ansiedad suba, nombra: 5 cosas que puedes ver, 4 cosas que puedes tocar, 3 cosas que puedes oír, 2 cosas que puedes oler, y 1 cosa que puedes saborear. Te trae al presente.""",
     """**Tensión/Relajación Progresiva:** Tensa un grupo muscular (puños, hombros) por 5 segundos y suéltalo completamente, sintiendo la diferencia. Repite 3 veces. Es una forma física de liberar la ansiedad.""",
 ]
@@ -106,30 +114,31 @@ async def call_gemini_api(payload: dict) -> str:
     return "Error desconocido en la comunicación con la IA."
 
 
-async def generate_gemini_response(prompt: str, user_id: str, is_first_message: bool) -> str:
+async def get_welcome_message(user_id: str) -> str:
+    """Función para generar y guardar el mensaje de bienvenida."""
+    welcome_message = (
+        "🌟 ¡Hola! Soy **Psicobot**, tu compañero de bienestar emocional.\n\n"
+        "Aquí encontrarás un espacio seguro y confidencial, disponible 24/7 para escucharte sin juicios.\n\n"
+        "Simplemente, **escríbeme lo que sientes, lo que piensas o lo que te preocupa**. Estoy programado para ofrecer apoyo cálido, validación y, si lo necesitas, técnicas prácticas para manejar el día a día.\n\n"
+        "¿Qué tienes en mente hoy? Empecemos cuando quieras. 😊"
+    )
+    # Guardar estado del primer mensaje para que no se repita
+    history = load_history()
+    user_data = history.get(user_id, {"messages": [], "counter": 0})
+    # Añade un marcador para saber que el usuario ya recibió la bienvenida
+    user_data["messages"].append({'role': 'model', 'parts': [{'text': "Mensaje de bienvenida"}]}) 
+    history[user_id] = user_data
+    save_history(history)
+    return welcome_message
+
+
+async def generate_gemini_response(prompt: str, user_id: str) -> str:
     """
     Gestiona el historial de chat, llama a la API de Gemini,
     y añade consejos proactivos.
     """
     
-    # 1. LOGICA DEL PRIMER MENSAJE
-    if is_first_message:
-        welcome_message = (
-            "🌟 ¡Hola! Soy **PazOhrBot**, tu compañero de bienestar emocional.\n\n"
-            "Aquí encontrarás un espacio seguro y confidencial, disponible 24/7 para escucharte sin juicios.\n\n"
-            "Simplemente, **escríbeme lo que sientes, lo que piensas o lo que te preocupa**. Estoy programado para ofrecer apoyo cálido, validación y, si lo necesitas, técnicas prácticas para manejar el día a día.\n\n"
-            "¿Qué tienes en mente hoy? Empecemos cuando quieras. 😊"
-        )
-        # 6. Guardar estado del primer mensaje para que no se repita
-        history = load_history()
-        user_data = history.get(user_id, {"messages": [], "counter": 0})
-        user_data["messages"].append({'role': 'model', 'parts': [{'text': "Mensaje de bienvenida"}]}) # Añade un marcador
-        history[user_id] = user_data
-        save_history(history)
-
-        return welcome_message
-
-    # 2. CARGAR Y PREPARAR HISTORIAL (Para la IA y el contador)
+    # 1. CARGAR Y PREPARAR HISTORIAL (Para la IA y el contador)
     history = load_history()
     user_data = history.get(user_id, {"messages": [], "counter": 0})
     current_messages = user_data["messages"]
@@ -143,9 +152,9 @@ async def generate_gemini_response(prompt: str, user_id: str, is_first_message: 
         if msg['role'] in ['user', 'model']
     ]
 
-    # 3. CONSTRUIR PAYLOAD DE GEMINI (CON CONTEXTO)
+    # 2. CONSTRUIR PAYLOAD DE GEMINI (CON CONTEXTO)
     
-    # 3a. Payload para la respuesta principal
+    # 2a. Payload para la respuesta principal
     content_list = context_messages_raw + [
         {'role': 'user', 'parts': [{'text': prompt}]} # El mensaje actual del usuario
     ]
@@ -157,10 +166,10 @@ async def generate_gemini_response(prompt: str, user_id: str, is_first_message: 
         }
     }
 
-    # 4. LLAMADA PRINCIPAL A GEMINI
+    # 3. LLAMADA PRINCIPAL A GEMINI
     reply_text = await call_gemini_api(payload_main)
 
-    # 5. LÓGICA DE CONSEJO PROACTIVO (CADA 5 MENSAJES)
+    # 4. LÓGICA DE CONSEJO PROACTIVO (CADA 5 MENSAJES)
     message_counter += 1
     
     final_response_text = reply_text
@@ -193,7 +202,7 @@ async def generate_gemini_response(prompt: str, user_id: str, is_first_message: 
         # Reiniciar contador después de dar un consejo
         message_counter = 0
 
-    # 6. ACTUALIZAR HISTORIAL
+    # 5. ACTUALIZAR HISTORIAL
     current_messages.append({'role': 'user', 'parts': [{'text': prompt}]})
     current_messages.append({'role': 'model', 'parts': [{'text': final_response_text}]})
     
@@ -205,7 +214,22 @@ async def generate_gemini_response(prompt: str, user_id: str, is_first_message: 
 
     return final_response_text
 
-# --- MANEJADOR DE MENSAJES DE TELEGRAM ---
+# --- MANEJADOR DE COMANDO /START ---
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Maneja el comando /start y envía el mensaje de bienvenida."""
+    user_id = str(update.message.from_user.id)
+    logger.info(f"Comando /start recibido de {user_id}")
+    
+    # Muestra el indicador de "escribiendo..."
+    await update.message.chat.send_action(action="typing")
+    
+    welcome_message = await get_welcome_message(user_id)
+    
+    # Enviar la bienvenida a Telegram
+    await update.message.reply_text(welcome_message, parse_mode='Markdown')
+
+
+# --- MANEJADOR DE MENSAJES DE TEXTO ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Maneja el mensaje entrante y llama a la IA para obtener la respuesta."""
     if not update.message or not update.message.text:
@@ -217,17 +241,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = str(update.message.from_user.id)
     chat_id = update.message.chat_id
     
-    logger.info(f"Mensaje recibido de {user_id} en chat {chat_id}: {user_message}")
-
     # Cargar historial para verificar si es el primer mensaje
     history = load_history()
     is_first_message = user_id not in history or not history[user_id].get("messages")
+    
+    # 1. SI ES EL PRIMER MENSAJE (Y NO ES /start) O SI HAY PROBLEMAS CON EL HISTORIAL
+    if is_first_message:
+        logger.info(f"Primer mensaje recibido de {user_id}: {user_message}")
+        await update.message.chat.send_action(action="typing")
+        welcome_message = await get_welcome_message(user_id)
+        await update.message.reply_text(welcome_message, parse_mode='Markdown')
+        return
+
+    # 2. CONTINUAR CON LA CONVERSACIÓN
+    logger.info(f"Mensaje recibido de {user_id} en chat {chat_id}: {user_message}")
     
     # Muestra el indicador de "escribiendo..."
     await update.message.chat.send_action(action="typing")
     
     # Obtener respuesta de Gemini y el consejo proactivo
-    gemini_text = await generate_gemini_response(user_message, user_id, is_first_message)
+    gemini_text = await generate_gemini_response(user_message, user_id)
     
     logger.info(f"Respuesta de Gemini: {gemini_text[:50]}...")
 
@@ -253,14 +286,30 @@ def main() -> None:
     # Se usa el Application.builder().token() para crear el bot.
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # Añadir un manejador de mensajes de texto, excluyendo comandos (como /start)
+    # Añadir un manejador de comandos /start (Nuevo!)
+    application.add_handler(CommandHandler("start", start_command))
+    
+    # Añadir un manejador de mensajes de texto, excluyendo comandos
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Bot de Telegram iniciado. Escuchando mensajes...")
+    # --- CAMBIO CRÍTICO: USAR WEBHOOK EN LUGAR DE POLLING ---
+    # Polling causa el error "Conflict: Terminated by other getUpdates request" en Railway.
     
-    # Inicia el polling (el método más común y fácil para bots simples en Railway)
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
+    if WEBHOOK_URL:
+        # Configuración para Railway (Modo Webhook)
+        path = TELEGRAM_BOT_TOKEN
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=path,
+            webhook_url=f"{WEBHOOK_URL}/{path}"
+        )
+        logger.info(f"Bot de Telegram iniciado en modo WEBHOOK en el puerto {PORT}.")
+        logger.info(f"WEBHOOK URL configurado: {WEBHOOK_URL}/{path}")
+    else:
+        # Modo Polling (Solo para prueba local o si no se configura WEB_URL)
+        logger.info("Bot de Telegram iniciado en modo POLLING (NO recomendado para Railway).")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        
 if __name__ == "__main__":
-
     main()
