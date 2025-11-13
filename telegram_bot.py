@@ -56,15 +56,14 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 def generate_response_sync(contents: list):
     """
     Genera una respuesta de Gemini de forma SÍNCRONA. 
-    Usa la sintaxis 'system_instruction' para la versión 0.3.0 de google-genai.
+    NOTA: El SYSTEM_PROMPT debe estar INYECTADO en el primer turno del usuario.
     """
     
     try:
-        # CORRECCIÓN CLAVE: Usamos 'system_instruction' como argumento directo.
+        # CORRECCIÓN CLAVE: Eliminamos cualquier argumento de system_instruction/generation_config.
         response = client.models.generate_content(
             model=MODEL_NAME,
-            contents=contents, # Enviamos el historial completo
-            system_instruction=SYSTEM_PROMPT 
+            contents=contents # Enviamos el historial completo (incluyendo el prompt inyectado)
         )
         return response.text.strip()
     except Exception as e:
@@ -99,27 +98,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_count += 1
     user_text = update.message.text.strip()
     
-    # 2. Agregar el mensaje actual del usuario al historial
-    current_contents = chat_history + [{"role": "user", "parts": [{"text": user_text}]}]
+    # 2. **CORRECCIÓN CLAVE GEMINI**: Inyectar SYSTEM_PROMPT en el primer mensaje
+    if not chat_history:
+        # Si no hay historial, prepend el SYSTEM_PROMPT al mensaje del usuario
+        user_content = f"{SYSTEM_PROMPT}\n\nUSER QUERY: {user_text}"
+        current_contents = [{"role": "user", "parts": [{"text": user_content}]}]
+    else:
+        # Si ya hay historial, simplemente agregamos el nuevo mensaje del usuario
+        current_contents = chat_history + [{"role": "user", "parts": [{"text": user_text}]}]
 
-    # 3. Ejecutar la función síncrona de Gemini en el ThreadPoolExecutor
+    # 3. Ejecutar la función síncrona de Gemini DIRECTAMENTE (Ya estamos en un hilo)
     reply = "Disculpe, ha ocurrido un error al procesar su solicitud."
     
     try:
-        # CORRECCIÓN CLAVE: Eliminamos el manejo manual de los loops.
-        # run_in_executor utiliza el loop ya activo.
-        reply = await asyncio.get_event_loop().run_in_executor(
-            executor,
-            generate_response_sync,
-            current_contents
-        )
+        # CORRECCIÓN CLAVE STABILITY: Llamada síncrona directa. No necesitamos run_in_executor 
+        # aquí porque la función generate_response_sync es síncrona y ya se ejecuta en un thread.
+        reply = generate_response_sync(current_contents)
         
         # 4. Actualizar el historial después de la respuesta exitosa
         new_history = current_contents + [{"role": "model", "parts": [{"text": reply}]}]
         context.user_data['chat_history'] = new_history
         
     except Exception as e:
-        logger.error(f"Error al ejecutar Gemini en el ThreadPool: {e}")
+        logger.error(f"Error al ejecutar Gemini de forma síncrona: {e}")
         
     # 5. Enviar respuesta principal
     try:
@@ -128,19 +129,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=reply
         )
     except Exception as e:
-        logger.error(f"Error al enviar la respuesta principal a Telegram (posible loop closed): {e}.")
+        logger.error(f"Error al enviar la respuesta principal a Telegram (Event loop closed): {e}.")
         return 
         
     # 6. Cada 4 mensajes: dar consejo adicional
     if message_count % 4 == 0:
         consejo_prompt = "Proporcione un consejo breve y profesional para manejar el estrés o mejorar el bienestar emocional."
         
-        # Generar el consejo en el ThreadPoolExecutor (sin historial)
-        consejo = await asyncio.get_event_loop().run_in_executor(
-            executor,
-            generate_response_sync,
-            [{"role": "user", "parts": [{"text": consejo_prompt}]}]
-        )
+        # Generar el consejo de forma síncrona
+        consejo = generate_response_sync([{"role": "user", "parts": [{"text": consejo_prompt}]}] )
         
         try:
             await context.bot.send_message(
@@ -209,9 +206,8 @@ def webhook():
         json_update = request.get_json(force=True)
         update = Update.de_json(json_update, application.bot)
         
-        # 2. **PASO CRÍTICO**: Delegar el procesamiento a un hilo aislado (SIN crear un nuevo loop)
+        # 2. **PASO CRÍTICO**: Delegar el procesamiento a un hilo aislado 
         def run_update_process():
-            # --- MODIFICACIÓN CLAVE PARA ESTABILIDAD ---
             # 1. Crear un nuevo loop específico para este hilo
             try:
                 loop = asyncio.new_event_loop()
