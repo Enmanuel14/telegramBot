@@ -87,7 +87,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['message_count'] += 1
 
     # Ejecutar la función síncrona de Gemini en el ThreadPoolExecutor
-    # Esto libera el event loop de Telegram mientras Gemini responde.
     try:
         reply = await asyncio.get_event_loop().run_in_executor(
             executor,
@@ -142,13 +141,19 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_m
 app = Flask(__name__)
 webhook_set = False
 
-# Inicialización síncrona garantizada antes del primer request
-@app.before_first_request
+# **CAMBIO CLAVE: Usamos before_request y un flag global para ejecutar la inicialización una sola vez**
+@app.before_request
 def setup_webhook_once():
-    """Ejecuta la inicialización del bot y establece el webhook de forma síncrona."""
+    """
+    Ejecuta la inicialización del bot y establece el webhook de forma síncrona. 
+    El 'flag' webhook_set asegura que solo se haga una vez.
+    """
     global webhook_set
     if webhook_set:
         return
+    
+    # Marcamos como True inmediatamente para evitar que otros hilos entren
+    webhook_set = True 
         
     try:
         application.initialize()
@@ -158,14 +163,22 @@ def setup_webhook_once():
         asyncio.run(application.bot.set_webhook(webhook_url))
         
         logger.info(f"✅ Webhook establecido correctamente en: {webhook_url}")
-        webhook_set = True
     except Exception as e:
         logger.error(f"❌ Error durante la inicialización del webhook: {e}")
+        # Si falla, podrías considerar poner webhook_set=False aquí para reintentar, 
+        # pero es mejor fallar al inicio y que el servidor se reinicie.
 
 
 @app.route(f"/{TOKEN}", methods=["POST"])
 async def webhook():
     """Maneja las actualizaciones de Telegram recibidas por el webhook."""
+    
+    # Verificación de seguridad: si el webhook no se estableció (ej: error en setup), 
+    # salimos para evitar errores en el procesamiento
+    if not webhook_set:
+        logger.error("❌ Recibido webhook, pero la inicialización falló o no se completó.")
+        return "Error", 500
+        
     try:
         # 1. Obtener la actualización
         json_update = await request.get_json(force=True)
