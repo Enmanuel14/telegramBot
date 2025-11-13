@@ -84,7 +84,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['chat_history'] = []
         context.user_data['message_count'] = 0
     
-    await context.bot.send_message(
+    # CORRECCIÓN CLAVE: Ejecutar send_message de forma síncrona para evitar 'Event loop is closed'
+    context.bot.send_message(
         chat_id=update.effective_chat.id,
         text="¡Bienvenido/a! Soy PazOhrBot, su acompañante virtual para el bienestar emocional. "
              "Puede compartir cómo se siente y le asistiré para encontrar la calma y el equilibrio."
@@ -120,7 +121,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     # 5. Enviar respuesta principal
     try:
-        await context.bot.send_message(
+        # CORRECCIÓN CLAVE: Ejecutar send_message de forma síncrona
+        context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=reply
         )
@@ -138,7 +140,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         try:
-            await context.bot.send_message(
+            # CORRECCIÓN CLAVE: Ejecutar send_message de forma síncrona
+            context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=f"💡 Un pensamiento para su bienestar: {consejo}"
             )
