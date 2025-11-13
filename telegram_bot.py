@@ -166,6 +166,9 @@ application = (
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+# ** NUEVA VARIABLE GLOBAL PARA ALMACENAR EL EVENT LOOP **
+global_loop = None
+
 # ==========================
 # WEBHOOK PARA RAILWAY (FLASK) - Versión Final Simplificada
 # ==========================
@@ -176,6 +179,7 @@ webhook_set = False
 async def setup_webhook():
     """Inicializa la aplicación, configura el webhook y la arranca (sin loop de polling)."""
     global webhook_set
+    global global_loop # Acceder a la variable global
     try:
         await application.initialize()
         webhook_url = f"https://{RAILWAY_URL}/{TOKEN}"
@@ -187,9 +191,8 @@ async def setup_webhook():
         # Esto también inicia el event loop de la aplicación.
         await application.start() 
         
-        # Después de application.start(), el bucle de eventos debe estar disponible
-        # en application.loop. Lo almacenamos si está disponible, aunque la forma de acceder
-        # desde el hilo de Flask es lo que suele causar problemas.
+        # *** ALMACENAR LA REFERENCIA DEL LOOP CREADO ***
+        global_loop = asyncio.get_running_loop()
         
         webhook_set = True
         logger.info(f"✅ Application iniciada. Webhook establecido en: {webhook_url}")
@@ -209,7 +212,7 @@ except Exception as e:
 def webhook(): 
     """
     Maneja las actualizaciones de Telegram recibidas por el webhook.
-    Programa la corrutina de procesamiento en el loop del PTB usando get_running_loop().
+    Programa la corrutina de procesamiento en el loop almacenado globalmente.
     """
     logger.info("🟢 Webhook recibido de Telegram. Enviando a cola de procesamiento de PTB.")
     
@@ -221,21 +224,16 @@ def webhook():
         json_update = request.get_json(force=True)
         update = Update.de_json(json_update, application.bot)
         
-        # FIX DEFINITIVO: Acceder al loop de eventos que está ejecutando la aplicación.
-        # Ya que 'application.start()' se ejecutó, debe haber un bucle en ejecución.
-        event_loop = asyncio.get_running_loop()
+        # Acceder al loop almacenado globalmente
+        if global_loop is None:
+             logger.error("❌ Error: global_loop no está configurado. La inicialización falló o no se completó.")
+             return "OK", 200
         
         # Usar run_coroutine_threadsafe para delegar la corrutina 
-        # (Application.process_update es async) al event loop del PTB.
-        asyncio.run_coroutine_threadsafe(application.process_update(update), event_loop)
+        # (Application.process_update es async) al event loop ALMACENADO.
+        asyncio.run_coroutine_threadsafe(application.process_update(update), global_loop)
         
         # Retornar OK inmediatamente.
-        return "OK", 200
-    except RuntimeError as e:
-        if "no running event loop" in str(e):
-             logger.error("❌ Error: No se encontró un bucle de eventos. Asegúrese de que application.start() se haya completado correctamente.")
-        else:
-             logger.error(f"❌ Error de tiempo de ejecución (bucle de eventos): {e}")
         return "OK", 200
     except Exception as e:
         logger.error(f"❌ Error procesando el webhook: {e}")
