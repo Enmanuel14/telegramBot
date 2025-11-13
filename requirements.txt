@@ -3,3 +3,4 @@ Flask==3.0.3
 google-genai==0.3.0
 python-dotenv
 requests
+Flask[async]
