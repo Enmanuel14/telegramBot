@@ -90,6 +90,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Ejecutar la función síncrona de Gemini en el ThreadPoolExecutor
     try:
+        # Usamos run_in_executor con el loop del hilo actual para correr la función síncrona
         reply = await asyncio.get_event_loop().run_in_executor(
             executor,
             generate_response_sync,
@@ -136,7 +137,6 @@ application = (
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-
 # ==========================
 # WEBHOOK PARA RAILWAY (FLASK)
 # ==========================
@@ -144,26 +144,33 @@ app = Flask(__name__)
 webhook_set = False
 
 # **INICIALIZACIÓN CRÍTICA: Se ejecuta al cargar el script, fuera de los hooks de Flask**
+async def setup_webhook():
+    """Inicializa la aplicación y configura el webhook de forma asíncrona."""
+    global webhook_set
+    try:
+        # **CAMBIO CLAVE: Llamar a initialize() con await**
+        await application.initialize()
+        webhook_url = f"https://{RAILWAY_URL}/{TOKEN}"
+        await application.bot.set_webhook(webhook_url)
+        
+        webhook_set = True
+        logger.info(f"✅ Webhook establecido correctamente en: {webhook_url}")
+    except Exception as e:
+        logger.error(f"❌ Error durante la inicialización asíncrona: {e}. Asegure que RAILWAY_URL es correcta.")
+        webhook_set = False
+
+# Ejecutar el setup al iniciar el script
 try:
-    application.initialize()
-    webhook_url = f"https://{RAILWAY_URL}/{TOKEN}"
-    
-    # Ejecución síncrona del set_webhook fuera de cualquier hook de Flask
-    # Esto asegura que se configure inmediatamente al iniciar el proceso
-    asyncio.run(application.bot.set_webhook(webhook_url))
-    
-    webhook_set = True
-    logger.info(f"✅ Webhook establecido correctamente en: {webhook_url}")
+    asyncio.run(setup_webhook())
 except Exception as e:
-    logger.error(f"❌ Error durante la inicialización del webhook: {e}. Asegure que RAILWAY_URL es correcta y accesible.")
-    # Si falla, el flag webhook_set se queda en False.
+    # Esto captura errores si asyncio.run() falla al inicio
+    logger.error(f"❌ Error al ejecutar asyncio.run(setup_webhook): {e}")
 
 
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook(): 
     """Maneja las actualizaciones de Telegram recibidas por el webhook."""
     
-    # 🚨 Log para confirmar que el webhook se recibe 🚨
     logger.info("🟢 Webhook recibido de Telegram. Procesando actualización en segundo plano.")
     
     if not webhook_set:
@@ -181,9 +188,12 @@ def webhook():
                 # Crea un nuevo loop y lo ejecuta hasta que el procesamiento de Telegram termine
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
+                
+                # process_update ya no fallará porque application.initialize() fue esperada
                 loop.run_until_complete(application.process_update(update))
                 logger.info("✅ Procesamiento de actualización completado en el ThreadPool.")
             except Exception as e:
+                # Si falla aquí, es probablemente un error de red al enviar la respuesta
                 logger.error(f"❌ Error crítico en el ThreadPool al procesar la actualización: {e}")
 
 
