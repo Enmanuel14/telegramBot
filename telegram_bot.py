@@ -2,13 +2,15 @@ import os
 import asyncio
 import concurrent.futures 
 import json
-from flask import Flask, request
+import logging
+import traceback 
+# Eliminamos 'flask' y 'request' ya que PTB manejará el servidor web
+# from flask import Flask, request 
+
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from google import genai
 from dotenv import load_dotenv
-import logging
-import traceback 
 
 # Configuración de logs para ver más detalles en Railway
 logging.basicConfig(
@@ -46,8 +48,9 @@ Responde de forma concisa, no más de 4 oraciones."""
 
 MODEL_NAME = "gemini-2.5-flash" 
 client = genai.Client(api_key=GEMINI_API_KEY)
-# Usaremos un ThreadPoolExecutor de nuevo para la llamada SÍNCRONA de Gemini 
-# dentro de una tarea asíncrona (esto es la forma correcta de mezclar Flask/async/sync)
+
+# Mantenemos el ThreadPoolExecutor para ejecutar la llamada SÍNCRONA de Gemini 
+# en el hilo de fondo de forma segura.
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=5) 
 
 # ==========================
@@ -85,7 +88,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['chat_history'] = []
         context.user_data['message_count'] = 0
     
-    # Usamos await, ya que PTB maneja el loop dentro de los handlers
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text="¡Bienvenido/a! Soy PazOhrBot, su acompañante virtual para el bienestar emocional. "
@@ -126,7 +128,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     # 5. Enviar respuesta principal
     try:
-        # Usamos await, ya que la ejecución está protegida dentro del handler de PTB.
+        # Aquí el 'await' ya no falla porque el event loop lo controla PTB
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=reply
@@ -169,70 +171,20 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # ==========================
-# WEBHOOK CONFIGURATION (Background Task Processing)
-# ==========================
-app = Flask(__name__)
-
-# Inicializar y configurar el Webhook
-async def setup_webhook():
-    """Inicializa la aplicación y configura el webhook de Telegram."""
-    try:
-        await application.initialize()
-        
-        webhook_url = f"https://{RAILWAY_URL}/{TOKEN}"
-        
-        # Seteamos el Webhook en Telegram
-        await application.bot.set_webhook(webhook_url)
-        
-        # Arrancamos la Application de PTB
-        await application.start()
-        
-        logger.info(f"✅ Application iniciada y Webhook establecido en: {webhook_url}")
-    except Exception as e:
-        logger.error(f"❌ Error durante la inicialización asíncrona: {e}.")
-        raise
-
-# Ejecutar setup al iniciar el script
-try:
-    asyncio.run(setup_webhook())
-except Exception as e:
-    logger.error(f"❌ Error fatal al ejecutar asyncio.run(setup_webhook): {e}")
-
-
-@app.route(f"/{TOKEN}", methods=["POST"])
-async def webhook(): 
-    """
-    Maneja las actualizaciones de Telegram recibidas.
-    🚨 CRUCIAL: Ejecuta el procesamiento en una tarea separada para devolver 200 OK inmediatamente.
-    """
-    logger.info("🟢 Webhook recibido de Telegram. Enviando a cola de procesamiento de PTB.")
-    
-    try:
-        update_json = request.get_json()
-        
-        if update_json is None:
-            return "OK", 200 
-            
-        update = Update.de_json(update_json, application.bot)
-        
-        # Iniciar el procesamiento del update en segundo plano, sin esperar.
-        # Esto libera el hilo web inmediatamente para evitar el timeout.
-        asyncio.create_task(application.process_update(update))
-        
-        # DEVOLVEMOS 200 OK INMEDIATAMENTE A TELEGRAM.
-        return "OK", 200
-        
-    except Exception as e:
-        logger.error(f"❌ Error procesando el webhook: {e}")
-        return "OK", 200
-
-@app.route("/")
-def home():
-    """Ruta para verificar que el servidor está activo."""
-    return "PazOhrBot está activo y esperando webhooks. 🕊️", 200
-
-# ==========================
-# BLOQUE DE EJECUCIÓN (Asegura que Gunicorn/Flask inicie)
+# BLOQUE DE EJECUCIÓN (Usando el servidor web de PTB)
 # ==========================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
+    # La ruta de URL que Telegram llamará (la misma que la RAILWAY_URL)
+    webhook_path = f"/{TOKEN}"
+    webhook_url = f"https://{RAILWAY_URL}{webhook_path}"
+    
+    logger.info(f"✨ Iniciando bot con run_webhook. Webhook URL: {webhook_url}")
+    
+    # Usamos Application.run_webhook para dejar que PTB gestione el event loop, 
+    # eliminando el conflicto de 'Event loop is closed'.
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=webhook_path,
+        webhook_url=webhook_url,
+    )
