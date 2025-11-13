@@ -184,6 +184,7 @@ async def setup_webhook():
         await application.bot.set_webhook(webhook_url)
         
         # Iniciar las tareas internas del PTB (handlers, etc.) para que el contexto esté listo
+        # Esto también inicia el event loop de la aplicación.
         await application.start() 
         
         webhook_set = True
@@ -203,7 +204,7 @@ except Exception as e:
 def webhook(): 
     """
     Maneja las actualizaciones de Telegram recibidas por el webhook.
-    Usa el método recomendado de la librería: poner la actualización en la cola de PTB.
+    Programa la corrutina de procesamiento en el loop del PTB.
     """
     logger.info("🟢 Webhook recibido de Telegram. Enviando a cola de procesamiento de PTB.")
     
@@ -215,9 +216,9 @@ def webhook():
         json_update = request.get_json(force=True)
         update = Update.de_json(json_update, application.bot)
         
-        # FIX FINAL: Enviar la Update a la cola (Queue) de la aplicación de PTB. 
-        # Esto delega el manejo del loop asíncrono al sistema interno de PTB.
-        application.process_update(update) # Este método en el contexto de webhook no necesita 'await' o 'submit'
+        # FIX FINAL: Usar run_coroutine_threadsafe para delegar la corrutina 
+        # (Application.process_update es async) al event loop del PTB.
+        asyncio.run_coroutine_threadsafe(application.process_update(update), application.loop)
         
         # Retornar OK inmediatamente.
         return "OK", 200
