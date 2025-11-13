@@ -4,19 +4,19 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from google import genai
 import asyncio
-
 from dotenv import load_dotenv
-import os
 
+# ==========================
+# CARGA DE VARIABLES DE ENTORNO
+# ==========================
 load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 RAILWAY_URL = os.getenv("RAILWAY_URL")
 PORT = int(os.getenv("PORT", 8080))
 
-print("TOKEN:", TOKEN)  # 👈 agrega esto temporalmente para ver si Railway lo lee
-
+print("TOKEN:", TOKEN)  # 👈 Verifica si Railway lo lee correctamente
 
 # ==========================
 # CONFIGURACIÓN DEL SISTEMA
@@ -27,12 +27,9 @@ Responde de forma cálida, reflexiva y en español.
 Mantente enfocado en el bienestar del usuario. 
 Responde de forma concisa, no más de 4 oraciones - Eres de Nicaragua."""
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MODEL_NAME = "gemini-1.5-flash"
-RAILWAY_URL = os.getenv("RAILWAY_URL")
-
 client = genai.Client(api_key=GEMINI_API_KEY)
+
 app = Flask(__name__)
 user_message_count = {}
 
@@ -72,31 +69,4 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_m
 
 # ==========================
 # WEBHOOK PARA RAILWAY
-# ==========================
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    json_update = request.get_json(force=True)
-    update = Update.de_json(json_update, application.bot)
-    asyncio.run(application.initialize())
-    asyncio.run(application.process_update(update))
-    return "OK", 200
-
-@app.route("/")
-def home():
-    return "PazOhrBot está activo 🕊️", 200
-
-# ==========================
-# INICIO DEL SERVICIO
-# ==========================
-if __name__ == "__main__":
-    PORT = int(os.environ.get("PORT", 8443))
-    webhook_url = f"https://{RAILWAY_URL}/{TOKEN}"
-
-    async def main():
-        await application.bot.set_webhook(webhook_url)
-        print(f"Webhook establecido en {webhook_url}")
-
-    asyncio.run(main())
-    app.run(host="0.0.0.0", port=PORT)
-
-
+# =====================
