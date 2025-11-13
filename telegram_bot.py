@@ -1,6 +1,6 @@
 import os
 import asyncio
-import concurrent.futures
+import concurrent.futures # Ya no se usa, pero lo dejamos por si acaso
 import json
 from flask import Flask, request
 from telegram import Update
@@ -45,8 +45,8 @@ Responde de forma concisa, no más de 4 oraciones."""
 
 MODEL_NAME = "gemini-2.5-flash" 
 client = genai.Client(api_key=GEMINI_API_KEY)
-# Pool de hilos para Gemini
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=10) 
+# Eliminamos el executor, la ejecución será síncrona en el hilo principal
+# executor = concurrent.futures.ThreadPoolExecutor(max_workers=10) 
 
 # ==========================
 # FUNCIONES AUXILIARES
@@ -54,6 +54,7 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 def generate_response_sync(contents: list):
     """Genera una respuesta de Gemini de forma SÍNCRONA."""
     try:
+        # Llama a la API de forma síncrona, bloqueando temporalmente el hilo.
         response = client.models.generate_content(
             model=MODEL_NAME,
             contents=contents 
@@ -61,19 +62,12 @@ def generate_response_sync(contents: list):
         return response.text.strip()
     except Exception as e:
         logger.error(f"Error al llamar a Gemini: {e}")
-        return "Disculpe, he experimentado un inconveniente técnico con la IA. ¿Podría reiterar su mensaje? Agradezco su comprensión."
+        # Este mensaje se enviará si falla la API de Gemini
+        return "Lo siento, hubo un error al procesar tu mensaje. Intenta nuevamente más tarde."
 
-async def safe_run_in_executor(func, *args):
-    """Ejecuta una función síncrona en el executor, manejando el cierre del loop."""
-    try:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(executor, func, *args)
-    except RuntimeError as e:
-        # Si el loop se está cerrando o no está disponible, intentamos ejecutar síncrono (caso de emergencia)
-        if 'Event loop is closed' in str(e) or 'no running event loop' in str(e):
-            logger.warning("⚠️ Loop no disponible o cerrado. Ejecutando llamada a Gemini de forma síncrona en el hilo principal.")
-            return func(*args)
-        raise
+# Eliminamos safe_run_in_executor ya que no usaremos un pool de hilos
+# async def safe_run_in_executor(func, *args):
+#     ...
 
 # ==========================
 # HANDLERS (ASÍNCRONOS)
@@ -84,8 +78,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['chat_history'] = []
         context.user_data['message_count'] = 0
     
-    # CORRECCIÓN DE ESTABILIDAD: Llamada síncrona para evitar "Event loop is closed" en Railway.
-    # Esto puede generar una RuntimeWarning, pero es necesario para que el bot responda.
+    # Llamada síncrona para evitar "Event loop is closed"
     context.bot.send_message(
         chat_id=update.effective_chat.id,
         text="¡Bienvenido/a! Soy PazOhrBot, su acompañante virtual para el bienestar emocional. "
@@ -110,19 +103,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply = "Disculpe, ha ocurrido un error al procesar su solicitud."
     
     try:
-        # 3. Ejecutamos la llamada síncrona de Gemini en el pool de hilos de forma asíncrona
-        reply = await safe_run_in_executor(generate_response_sync, current_contents)
+        # 3. Ejecutamos la llamada a Gemini DIRECTAMENTE (SÍNCRONA)
+        # Esto bloquea el hilo, pero es más estable que el executor que estaba fallando
+        reply = generate_response_sync(current_contents)
         
-        # 4. Actualizar el historial
-        new_history = current_contents + [{"role": "model", "parts": [{"text": reply}]}]
-        context.user_data['chat_history'] = new_history
+        # 4. Actualizar el historial (Solo si la respuesta no es el mensaje de error de fallback)
+        if not reply.startswith("Lo siento, hubo un error"):
+            new_history = current_contents + [{"role": "model", "parts": [{"text": reply}]}]
+            context.user_data['chat_history'] = new_history
+        else:
+            logger.error("Gemini devolvió el mensaje de error de fallback.")
         
     except Exception as e:
-        logger.error(f"Error al ejecutar Gemini de forma asíncrona: {e}")
+        logger.error(f"Error al ejecutar Gemini de forma síncrona: {e}")
         
     # 5. Enviar respuesta principal
     try:
-        # CORRECCIÓN DE ESTABILIDAD: Llamada síncrona para evitar "Event loop is closed" en Railway.
+        # Llamada síncrona para evitar "Event loop is closed"
         context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=reply
@@ -135,13 +132,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if message_count % 4 == 0:
         consejo_prompt = "Proporcione un consejo breve y profesional para manejar el estrés o mejorar el bienestar emocional."
         
-        consejo = await safe_run_in_executor(
-            generate_response_sync, 
+        # Ejecutamos el consejo también de forma SÍNCRONA
+        consejo = generate_response_sync(
             [{"role": "user", "parts": [{"text": consejo_prompt}]}]
         )
         
         try:
-            # CORRECCIÓN DE ESTABILIDAD: Llamada síncrona para evitar "Event loop is closed" en Railway.
+            # Llamada síncrona para evitar "Event loop is closed"
             context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=f"💡 Un pensamiento para su bienestar: {consejo}"
