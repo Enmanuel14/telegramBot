@@ -57,6 +57,9 @@ def generate_response_sync(contents: list):
     """
     Genera una respuesta de Gemini de forma SÍNCRONA. 
     Acepta el historial de chat COMPLETO incluyendo el turno del usuario actual.
+    
+    CORRECCIÓN CLAVE: Usamos 'generation_config' para pasar la instrucción del sistema
+    porque la librería google-genai 0.3.0 no acepta 'system_instruction' como argumento directo.
     """
     
     try:
@@ -64,7 +67,8 @@ def generate_response_sync(contents: list):
         response = client.models.generate_content(
             model=MODEL_NAME,
             contents=contents, # Enviamos el historial completo
-            system_instruction=SYSTEM_PROMPT # Usamos el parámetro system_instruction
+            # La instrucción del sistema se pasa dentro de generation_config
+            generation_config={"system_instruction": SYSTEM_PROMPT} 
         )
         return response.text.strip()
     except Exception as e:
@@ -80,9 +84,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['chat_history'] = []
     context.user_data['message_count'] = 0
     
-    await update.message.reply_text(
-        "¡Bienvenido/a! Soy PazOhrBot, su acompañante virtual para el bienestar emocional. "
-        "Puede compartir cómo se siente y le asistiré para encontrar la calma y el equilibrio."
+    # CORRECCIÓN CLAVE: Usar la función síncrona de Telegram para enviar la respuesta 
+    # desde un hilo del pool, previniendo el error "Event loop is closed".
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="¡Bienvenido/a! Soy PazOhrBot, su acompañante virtual para el bienestar emocional. "
+             "Puede compartir cómo se siente y le asistiré para encontrar la calma y el equilibrio."
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -98,43 +105,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text.strip()
     
     # 2. **PASO CLAVE DE MEMORIA**: Agregar el mensaje actual del usuario al historial
-    # Creamos una copia del historial y le agregamos el nuevo turno.
     current_contents = chat_history + [{"role": "user", "parts": [{"text": user_text}]}]
 
-
     # 3. Ejecutar la función síncrona de Gemini en el ThreadPoolExecutor
+    reply = "Disculpe, ha ocurrido un error al procesar su solicitud."
+    
     try:
-        # Importante: usar el loop del hilo actual si existe, o crear uno nuevo
+        # Usamos el loop del hilo actual para ejecutar la función síncrona
         loop = asyncio.get_event_loop()
-        if loop.is_running():
-            current_loop = loop
-        else:
+        if not loop.is_running():
             current_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(current_loop)
-            
-        # Ejecutamos la función síncrona de Gemini en el ThreadPoolExecutor
-        # Pasamos el historial COMPLETO, incluyendo el mensaje actual.
-        reply = await current_loop.run_in_executor(
+        
+        # Ejecutamos la función síncrona de Gemini
+        reply = await asyncio.get_event_loop().run_in_executor(
             executor,
             generate_response_sync,
             current_contents
         )
         
         # 4. **PASO CLAVE DE MEMORIA**: Actualizar el historial después de la respuesta exitosa
-        # Al historial de entrada le agregamos la respuesta del modelo
         new_history = current_contents + [{"role": "model", "parts": [{"text": reply}]}]
         context.user_data['chat_history'] = new_history
         
     except Exception as e:
         logger.error(f"Error al ejecutar Gemini en el ThreadPool: {e}")
-        reply = "Disculpe, ha ocurrido un error al procesar su solicitud."
+        # Si falla Gemini, el reply se mantiene con el mensaje de error predeterminado
         
-    # 5. Enviar respuesta principal
+    # 5. Enviar respuesta principal (USANDO LA CORRECCIÓN CLAVE)
     try:
-        await update.message.reply_text(reply)
+        # Usar context.bot.send_message en lugar de update.message.reply_text para estabilidad
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=reply
+        )
     except Exception as e:
-        # Captura errores de red al intentar responder (incluye loop closed)
-        logger.error(f"Error al enviar la respuesta principal a Telegram: {e}.")
+        logger.error(f"Error al enviar la respuesta principal a Telegram (posible loop closed): {e}.")
         return 
         
     # 6. Cada 4 mensajes: dar consejo adicional
@@ -149,7 +155,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         try:
-            await update.message.reply_text(f"💡 Un pensamiento para su bienestar: {consejo}")
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"💡 Un pensamiento para su bienestar: {consejo}"
+            )
         except Exception as e:
             logger.error(f"Error al enviar el consejo extra a Telegram: {e}")
 
@@ -224,8 +233,6 @@ def webhook():
                 loop.run_until_complete(application.process_update(update))
                 
                 # 3. Limpieza: Cierra el loop después de usarlo. 
-                # Esto previene que se re-utilice un loop cerrado accidentalmente.
-                # También ejecuta tareas pendientes.
                 loop.close() 
                 
                 logger.info("✅ Procesamiento de actualización completado en el ThreadPool.")
