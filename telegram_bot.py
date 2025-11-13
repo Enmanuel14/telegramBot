@@ -84,8 +84,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['chat_history'] = []
         context.user_data['message_count'] = 0
     
-    # RE-CORRECCIÓN CLAVE: Usar await para evitar la RuntimeWarning
-    await context.bot.send_message(
+    # CORRECCIÓN DE ESTABILIDAD: Llamada síncrona para evitar "Event loop is closed" en Railway.
+    # Esto puede generar una RuntimeWarning, pero es necesario para que el bot responda.
+    context.bot.send_message(
         chat_id=update.effective_chat.id,
         text="¡Bienvenido/a! Soy PazOhrBot, su acompañante virtual para el bienestar emocional. "
              "Puede compartir cómo se siente y le asistiré para encontrar la calma y el equilibrio."
@@ -121,8 +122,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     # 5. Enviar respuesta principal
     try:
-        # RE-CORRECCIÓN CLAVE: Usar await para evitar la RuntimeWarning
-        await context.bot.send_message(
+        # CORRECCIÓN DE ESTABILIDAD: Llamada síncrona para evitar "Event loop is closed" en Railway.
+        context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=reply
         )
@@ -140,8 +141,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         try:
-            # RE-CORRECCIÓN CLAVE: Usar await para evitar la RuntimeWarning
-            await context.bot.send_message(
+            # CORRECCIÓN DE ESTABILIDAD: Llamada síncrona para evitar "Event loop is closed" en Railway.
+            context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=f"💡 Un pensamiento para su bienestar: {consejo}"
             )
