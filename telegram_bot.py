@@ -7,6 +7,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from google import genai
 from dotenv import load_dotenv
 import logging
+import threading # Necesario para obtener el loop actual del hilo
 
 # Configuración de logs para ver más detalles en Railway
 logging.basicConfig(
@@ -38,12 +39,12 @@ else:
 # CONFIGURACIÓN DEL SISTEMA Y CLIENTE GEMINI
 # ==========================
 SYSTEM_PROMPT = """Eres un psicólogo virtual llamado PazOhrBot.
-Tu objetivo es proporcionar apoyo, consejos de bienestar emocional y mantener una conversación empática y confidencial.
-Responde de forma cálida, reflexiva y en español.
-Mantente enfocado en el bienestar del usuario.
-Responde de forma concisa, no más de 4 oraciones - Eres de Nicaragua."""
+Tu objetivo es proporcionar apoyo y consejos de bienestar emocional.
+Responde de forma profesional, formal, respetuosa y con un lenguaje internacional neutral en español.
+Mantente enfocado en el bienestar y las necesidades del usuario.
+Responde de forma concisa, no más de 4 oraciones."""
 
-# **CAMBIO AQUÍ: Usar gemini-2.5-flash para compatibilidad con la API V1Beta**
+# **Modelo correcto para la API V1Beta**
 MODEL_NAME = "gemini-2.5-flash" 
 client = genai.Client(api_key=GEMINI_API_KEY)
 # Pool de hilos para ejecutar llamadas síncronas a Gemini y manejar updates aisladamente
@@ -52,78 +53,108 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 # ==========================
 # FUNCIONES (Ahora síncronas, se ejecutan en el ThreadPool)
 # ==========================
-def generate_response_sync(prompt: str):
+def generate_response_sync(contents: list):
     """
     Genera una respuesta de Gemini de forma SÍNCRONA. 
-    Esta función se llamará dentro de un ThreadPool.
+    Acepta el historial de chat COMPLETO incluyendo el turno del usuario actual.
     """
-    full_prompt = f"{SYSTEM_PROMPT}\n\nUsuario: {prompt}\nPazOhrBot:"
     
     try:
         # La llamada es síncrona
         response = client.models.generate_content(
             model=MODEL_NAME,
-            contents=full_prompt
+            contents=contents, # Enviamos el historial completo
+            system_instruction=SYSTEM_PROMPT # Usamos el parámetro system_instruction
         )
         return response.text.strip()
     except Exception as e:
         # Detalle de log mejorado
         logger.error(f"Error al llamar a Gemini (Modelo: {MODEL_NAME}): {e}")
-        return "Disculpá, tuve un pequeño fallo técnico con la IA. ¿Podrías repetirme lo que me decías? 🙏"
+        return "Disculpe, he experimentado un inconveniente técnico con la inteligencia artificial. ¿Podría reiterar su mensaje? Agradezco su comprensión."
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja el comando /start."""
+    """Maneja el comando /start e inicializa el historial de chat."""
+    
+    # Reiniciar la memoria al iniciar
+    context.user_data['chat_history'] = []
+    context.user_data['message_count'] = 0
+    
     await update.message.reply_text(
-        "¡Hola 😊! Soy PazOhrBot, tu acompañante virtual para el bienestar emocional. "
-        "Podés contarme cómo te sentís y te ayudaré a encontrar calma y equilibrio."
+        "¡Bienvenido/a! Soy PazOhrBot, su acompañante virtual para el bienestar emocional. "
+        "Puede compartir cómo se siente y le asistiré para encontrar la calma y el equilibrio."
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Maneja mensajes de texto. La generación de Gemini se hace 
-    en un hilo (síncrona), y el envío de Telegram es asíncrono.
+    Maneja mensajes de texto, guarda el historial de chat y genera la respuesta.
     """
     
-    if 'message_count' not in context.user_data:
-        context.user_data['message_count'] = 0
+    # 1. Inicializar o recuperar datos
+    chat_history = context.user_data.get('chat_history', [])
+    message_count = context.user_data.get('message_count', 0)
     
-    context.user_data['message_count'] += 1
+    message_count += 1
+    user_text = update.message.text.strip()
+    
+    # 2. **PASO CLAVE DE MEMORIA**: Agregar el mensaje actual del usuario al historial
+    # Creamos una copia del historial y le agregamos el nuevo turno.
+    current_contents = chat_history + [{"role": "user", "parts": [{"text": user_text}]}]
 
-    # Ejecutar la función síncrona de Gemini en el ThreadPoolExecutor
+
+    # 3. Ejecutar la función síncrona de Gemini en el ThreadPoolExecutor
     try:
-        # Usamos run_in_executor con el loop del hilo actual para correr la función síncrona
-        reply = await asyncio.get_event_loop().run_in_executor(
+        # Importante: usar el loop del hilo actual si existe, o crear uno nuevo
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            current_loop = loop
+        else:
+            current_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(current_loop)
+            
+        # Ejecutamos la función síncrona de Gemini en el ThreadPoolExecutor
+        # Pasamos el historial COMPLETO, incluyendo el mensaje actual.
+        reply = await current_loop.run_in_executor(
             executor,
             generate_response_sync,
-            update.message.text.strip()
+            current_contents
         )
+        
+        # 4. **PASO CLAVE DE MEMORIA**: Actualizar el historial después de la respuesta exitosa
+        # Al historial de entrada le agregamos la respuesta del modelo
+        new_history = current_contents + [{"role": "model", "parts": [{"text": reply}]}]
+        context.user_data['chat_history'] = new_history
+        
     except Exception as e:
         logger.error(f"Error al ejecutar Gemini en el ThreadPool: {e}")
-        reply = "Disculpá, hubo un problema al procesar tu solicitud."
-
-    # Enviar respuesta principal
+        reply = "Disculpe, ha ocurrido un error al procesar su solicitud."
+        
+    # 5. Enviar respuesta principal
     try:
         await update.message.reply_text(reply)
     except Exception as e:
-        logger.error(f"Error al enviar la respuesta principal a Telegram: {e}. Causa probable: Event loop cerrado.")
+        # Captura errores de red al intentar responder (incluye loop closed)
+        logger.error(f"Error al enviar la respuesta principal a Telegram: {e}.")
         return 
         
-    # Cada 4 mensajes: dar consejo adicional
-    if context.user_data['message_count'] % 4 == 0:
-        consejo_prompt = "Dame un consejo breve para manejar el estrés o mejorar el bienestar emocional."
+    # 6. Cada 4 mensajes: dar consejo adicional
+    if message_count % 4 == 0:
+        consejo_prompt = "Proporcione un consejo breve y profesional para manejar el estrés o mejorar el bienestar emocional."
         
-        # Generar el consejo en el ThreadPoolExecutor
+        # Generar el consejo en el ThreadPoolExecutor (sin historial)
         consejo = await asyncio.get_event_loop().run_in_executor(
             executor,
             generate_response_sync,
-            consejo_prompt
+            [{"role": "user", "parts": [{"text": consejo_prompt}]}]
         )
         
         try:
-            await update.message.reply_text(f"💡 Un pequeño pensamiento extra: {consejo}")
+            await update.message.reply_text(f"💡 Un pensamiento para su bienestar: {consejo}")
         except Exception as e:
-            logger.error(f"Error al enviar el consejo a Telegram: {e}")
+            logger.error(f"Error al enviar el consejo extra a Telegram: {e}")
+
+    # Guardar el contador actualizado
+    context.user_data['message_count'] = message_count
 
 
 # ==========================
@@ -150,7 +181,6 @@ async def setup_webhook():
     """Inicializa la aplicación y configura el webhook de forma asíncrona."""
     global webhook_set
     try:
-        # **CAMBIO CLAVE: Llamar a initialize() con await**
         await application.initialize()
         webhook_url = f"https://{RAILWAY_URL}/{TOKEN}"
         await application.bot.set_webhook(webhook_url)
@@ -165,7 +195,6 @@ async def setup_webhook():
 try:
     asyncio.run(setup_webhook())
 except Exception as e:
-    # Esto captura errores si asyncio.run() falla al inicio
     logger.error(f"❌ Error al ejecutar asyncio.run(setup_webhook): {e}")
 
 
@@ -180,24 +209,28 @@ def webhook():
         return "Error", 500
         
     try:
-        # 1. Obtener la actualización de forma síncrona
         json_update = request.get_json(force=True)
         update = Update.de_json(json_update, application.bot)
         
-        # 2. **PASO CRÍTICO**: Delegar el procesamiento a un hilo aislado
+        # 2. **PASO CRÍTICO**: Delegar el procesamiento a un hilo aislado (SIN crear un nuevo loop)
         def run_update_process():
+            # --- MODIFICACIÓN CLAVE PARA ESTABILIDAD ---
+            # 1. Crear un nuevo loop específico para este hilo
             try:
-                # Crea un nuevo loop y lo ejecuta hasta que el procesamiento de Telegram termine
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 
-                # process_update ya no fallará porque application.initialize() fue esperada
+                # 2. Ejecutar el proceso asíncrono
                 loop.run_until_complete(application.process_update(update))
+                
+                # 3. Limpieza: Cierra el loop después de usarlo. 
+                # Esto previene que se re-utilice un loop cerrado accidentalmente.
+                # También ejecuta tareas pendientes.
+                loop.close() 
+                
                 logger.info("✅ Procesamiento de actualización completado en el ThreadPool.")
             except Exception as e:
-                # Si falla aquí, es probablemente un error de red al enviar la respuesta
                 logger.error(f"❌ Error crítico en el ThreadPool al procesar la actualización: {e}")
-
 
         # Enviar la tarea al ThreadPoolExecutor para su ejecución en segundo plano
         executor.submit(run_update_process)
@@ -206,7 +239,6 @@ def webhook():
         return "OK", 200
     except Exception as e:
         logger.error(f"❌ Error procesando el webhook ANTES de enviar al ThreadPool: {e}")
-        # Retorna 200 OK para evitar reintentos de Telegram, pero con log de error.
         return "OK", 200 
 
 @app.route("/")
