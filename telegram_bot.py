@@ -30,6 +30,7 @@ if not all([TOKEN, GEMINI_API_KEY, RAILWAY_URL]):
     logger.error("🚨 FALTA UNA VARIABLE DE ENTORNO CRÍTICA (TELEGRAM_TOKEN, GEMINI_API_KEY, o RAILWAY_URL).")
     exit(1)
 else:
+    # Limpiamos el URL por si tiene el prefijo https://
     RAILWAY_URL = RAILWAY_URL.replace("https://", "")
     logger.info(f"✅ Variables cargadas. Webhook URL base: https://{RAILWAY_URL}/{TOKEN}")
 
@@ -44,7 +45,8 @@ Responde de forma concisa, no más de 4 oraciones - Eres de Nicaragua."""
 
 MODEL_NAME = "gemini-1.5-flash"
 client = genai.Client(api_key=GEMINI_API_KEY)
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=5) # Ejecutor para tareas en segundo plano
+# Pool de hilos para ejecutar llamadas síncronas a Gemini y manejar updates aisladamente
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=10) 
 
 # ==========================
 # FUNCIONES (Ahora síncronas, se ejecutan en el ThreadPool)
@@ -141,60 +143,67 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_m
 app = Flask(__name__)
 webhook_set = False
 
-# **CAMBIO CLAVE: Usamos before_request y un flag global para ejecutar la inicialización una sola vez**
-@app.before_request
-def setup_webhook_once():
-    """
-    Ejecuta la inicialización del bot y establece el webhook de forma síncrona. 
-    El 'flag' webhook_set asegura que solo se haga una vez.
-    """
-    global webhook_set
-    if webhook_set:
-        return
+# **INICIALIZACIÓN CRÍTICA: Se ejecuta al cargar el script, fuera de los hooks de Flask**
+try:
+    application.initialize()
+    webhook_url = f"https://{RAILWAY_URL}/{TOKEN}"
     
-    # Marcamos como True inmediatamente para evitar que otros hilos entren
-    webhook_set = True 
-        
-    try:
-        application.initialize()
-        webhook_url = f"https://{RAILWAY_URL}/{TOKEN}"
-        
-        # Usamos asyncio.run() para ejecutar el set_webhook síncrona
-        asyncio.run(application.bot.set_webhook(webhook_url))
-        
-        logger.info(f"✅ Webhook establecido correctamente en: {webhook_url}")
-    except Exception as e:
-        logger.error(f"❌ Error durante la inicialización del webhook: {e}")
-        # Si falla, podrías considerar poner webhook_set=False aquí para reintentar, 
-        # pero es mejor fallar al inicio y que el servidor se reinicie.
+    # Ejecución síncrona del set_webhook fuera de cualquier hook de Flask
+    # Esto asegura que se configure inmediatamente al iniciar el proceso
+    asyncio.run(application.bot.set_webhook(webhook_url))
+    
+    webhook_set = True
+    logger.info(f"✅ Webhook establecido correctamente en: {webhook_url}")
+except Exception as e:
+    logger.error(f"❌ Error durante la inicialización del webhook: {e}. Asegure que RAILWAY_URL es correcta y accesible.")
+    # Si falla, el flag webhook_set se queda en False.
 
 
 @app.route(f"/{TOKEN}", methods=["POST"])
-async def webhook():
+def webhook(): 
     """Maneja las actualizaciones de Telegram recibidas por el webhook."""
     
-    # Verificación de seguridad: si el webhook no se estableció (ej: error en setup), 
-    # salimos para evitar errores en el procesamiento
+    # 🚨 Log para confirmar que el webhook se recibe 🚨
+    logger.info("🟢 Webhook recibido de Telegram. Procesando actualización en segundo plano.")
+    
     if not webhook_set:
         logger.error("❌ Recibido webhook, pero la inicialización falló o no se completó.")
         return "Error", 500
         
     try:
-        # 1. Obtener la actualización
-        json_update = await request.get_json(force=True)
+        # 1. Obtener la actualización de forma síncrona
+        json_update = request.get_json(force=True)
         update = Update.de_json(json_update, application.bot)
         
-        # 2. Procesar la actualización. Esto se ejecutará en el event loop de Flask/Gunicorn
-        await application.process_update(update)
+        # 2. **PASO CRÍTICO**: Delegar el procesamiento a un hilo aislado
+        def run_update_process():
+            try:
+                # Crea un nuevo loop y lo ejecuta hasta que el procesamiento de Telegram termine
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(application.process_update(update))
+                logger.info("✅ Procesamiento de actualización completado en el ThreadPool.")
+            except Exception as e:
+                logger.error(f"❌ Error crítico en el ThreadPool al procesar la actualización: {e}")
+
+
+        # Enviar la tarea al ThreadPoolExecutor para su ejecución en segundo plano
+        executor.submit(run_update_process)
         
-        # 3. Retornar OK inmediatamente
+        # 3. Retornar OK inmediatamente.
         return "OK", 200
     except Exception as e:
-        logger.error(f"Error procesando el webhook: {e}")
-        # Retornar 200 OK a Telegram para evitar reintentos, pero registrar el error.
+        logger.error(f"❌ Error procesando el webhook ANTES de enviar al ThreadPool: {e}")
+        # Retorna 200 OK para evitar reintentos de Telegram, pero con log de error.
         return "OK", 200 
 
 @app.route("/")
 def home():
     """Ruta para verificar que el servidor está activo."""
     return "PazOhrBot está activo y esperando webhooks. 🕊️", 200
+
+# ==========================
+# BLOQUE DE EJECUCIÓN (Asegura que Gunicorn/Flask inicie)
+# ==========================
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=PORT)
