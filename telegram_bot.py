@@ -11,7 +11,7 @@ import threading
 
 # Configuración de logs para ver más detalles en Railway
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %(name__s) - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ Responde de forma concisa, no más de 4 oraciones."""
 
 MODEL_NAME = "gemini-2.5-flash" 
 client = genai.Client(api_key=GEMINI_API_KEY)
-# Pool de hilos para ejecutar llamadas síncronas a Gemini (usado por PTB)
+# Pool de hilos para manejar la concurrencia de Flask y ejecutar Gemini
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=10) 
 
 # ==========================
@@ -101,9 +101,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply = "Disculpe, ha ocurrido un error al procesar su solicitud."
     
     try:
-        # Usamos application.bot.loop.run_in_executor para ejecutar la llamada síncrona 
-        # de Gemini de forma segura dentro del loop asíncrono de PTB.
-        reply = await application.bot.loop.run_in_executor(
+        # Ejecutamos la llamada síncrona de Gemini en el pool de hilos
+        reply = await context.application.loop.run_in_executor(
             executor, 
             generate_response_sync, 
             current_contents
@@ -118,6 +117,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     # 5. Enviar respuesta principal
     try:
+        # Esta línea DEBE ser estable ahora que el ThreadPool la maneja correctamente.
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=reply
@@ -131,7 +131,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         consejo_prompt = "Proporcione un consejo breve y profesional para manejar el estrés o mejorar el bienestar emocional."
         
         # Generar el consejo de forma síncrona
-        consejo = await application.bot.loop.run_in_executor(
+        consejo = await context.application.loop.run_in_executor(
             executor, 
             generate_response_sync, 
             [{"role": "user", "parts": [{"text": consejo_prompt}]}]
@@ -162,38 +162,43 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # ==========================
-# WEBHOOK PARA RAILWAY (FLASK) - CRITICAL RESTRUCTURE
+# WEBHOOK PARA RAILWAY (FLASK) - Versión Sencilla y Estable
 # ==========================
 app = Flask(__name__)
 webhook_set = False
 
-# **Función para correr el loop de PTB en un hilo separado**
-def run_ptb_worker():
-    """Ejecuta el ciclo de vida de la aplicación PTB en un thread daemon."""
+# **Función de utilidad para ejecutar el proceso asíncrono en un thread**
+def process_update_async(update):
+    """Ejecuta el proceso asíncrono de Telegram en un nuevo event loop temporal y estable."""
     try:
-        # run_until_shutdown() ejecuta el loop asíncrono de PTB hasta que se le diga que pare.
-        asyncio.run(application.run_until_shutdown())
+        # Se establece un nuevo loop para cada thread de worker, pero no se cierra
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # La forma más simple de ejecutar el proceso del PTB
+        loop.run_until_complete(application.process_update(update))
+        
+        # logging.info("✅ Procesamiento de actualización completado en el ThreadPool.")
+        # No se llama a loop.close() para evitar el RuntimeError
+        
     except Exception as e:
-        logger.error(f"❌ Error al ejecutar el loop de PTB en el thread: {e}")
+        logger.error(f"❌ Error crítico en el ThreadPool al procesar la actualización: {e}")
 
-# **Inicialización: Seteo de Webhook y arranque del Thread Worker**
+
+# **Inicialización: Solo seteo de Webhook y arranque del Application**
 async def setup_webhook():
-    """Inicializa la aplicación, configura el webhook y arranca el worker de PTB."""
+    """Inicializa la aplicación, configura el webhook y la arranca (sin loop de polling)."""
     global webhook_set
     try:
         await application.initialize()
         webhook_url = f"https://{RAILWAY_URL}/{TOKEN}"
         await application.bot.set_webhook(webhook_url)
         
-        # 1. Arrancar el thread de worker de PTB
-        worker_thread = threading.Thread(target=run_ptb_worker, daemon=True)
-        worker_thread.start()
-        
-        # 2. Iniciar las tareas internas del PTB (handlers, etc.)
+        # Iniciar las tareas internas del PTB (handlers, etc.) para que el contexto esté listo
         await application.start() 
         
         webhook_set = True
-        logger.info(f"✅ Worker de PTB iniciado. Webhook establecido en: {webhook_url}")
+        logger.info(f"✅ Application iniciada. Webhook establecido en: {webhook_url}")
     except Exception as e:
         logger.error(f"❌ Error durante la inicialización asíncrona: {e}.")
         webhook_set = False
@@ -209,7 +214,7 @@ except Exception as e:
 def webhook(): 
     """Maneja las actualizaciones de Telegram recibidas por el webhook."""
     
-    logger.info("🟢 Webhook recibido de Telegram. Enviando a cola de procesamiento de PTB.")
+    logger.info("🟢 Webhook recibido de Telegram. Delegando a ThreadPool.")
     
     if not webhook_set:
         logger.error("❌ Recibido webhook, pero la inicialización falló o no se completó.")
@@ -219,11 +224,10 @@ def webhook():
         json_update = request.get_json(force=True)
         update = Update.de_json(json_update, application.bot)
         
-        # 2. FIX CRÍTICO: Colocar la actualización en la cola de la aplicación PTB.
-        # El thread worker iniciado en setup_webhook se encargará de procesarla de forma asíncrona y segura.
-        application.update_queue.put(update)
+        # FIX FINAL: Delegar la ejecución asíncrona al ThreadPoolExecutor
+        executor.submit(process_update_async, update)
         
-        # 3. Retornar OK inmediatamente (sin esperar la respuesta).
+        # Retornar OK inmediatamente.
         return "OK", 200
     except Exception as e:
         logger.error(f"❌ Error procesando el webhook: {e}")
