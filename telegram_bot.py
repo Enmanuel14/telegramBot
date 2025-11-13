@@ -1,6 +1,6 @@
 import os
 import asyncio
-import concurrent.futures # Ya no se usa, pero lo dejamos por si acaso
+import concurrent.futures 
 import json
 from flask import Flask, request
 from telegram import Update
@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from google import genai
 from dotenv import load_dotenv
 import logging
-import traceback # Importamos para obtener el stack trace
+import traceback 
 
 # Configuración de logs para ver más detalles en Railway
 logging.basicConfig(
@@ -46,8 +46,9 @@ Responde de forma concisa, no más de 4 oraciones."""
 
 MODEL_NAME = "gemini-2.5-flash" 
 client = genai.Client(api_key=GEMINI_API_KEY)
-# Eliminamos el executor, la ejecución será síncrona en el hilo principal
-# executor = concurrent.futures.ThreadPoolExecutor(max_workers=10) 
+# Usaremos un ThreadPoolExecutor de nuevo para la llamada SÍNCRONA de Gemini 
+# dentro de una tarea asíncrona (esto es la forma correcta de mezclar Flask/async/sync)
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=5) 
 
 # ==========================
 # FUNCIONES AUXILIARES
@@ -55,38 +56,37 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 def generate_response_sync(contents: list):
     """Genera una respuesta de Gemini de forma SÍNCRONA."""
     try:
-        # Llama a la API de forma síncrona, bloqueando temporalmente el hilo.
         response = client.models.generate_content(
             model=MODEL_NAME,
             contents=contents 
         )
         return response.text.strip()
     except Exception as e:
-        # CORRECCIÓN DE LOG: Imprimir el stack trace para debugging
         error_details = traceback.format_exc()
         status_code = getattr(e, 'http_status', 'N/A')
         
         logger.error(f"❌ Error al llamar a Gemini. HTTP Status: {status_code}. Detalles: {e}")
         logger.error(f"Stack Trace Completo: {error_details}")
 
-        # Este mensaje se enviará si falla la API de Gemini
         return "Lo siento, hubo un error al procesar tu mensaje. Intenta nuevamente más tarde."
 
-# Eliminamos safe_run_in_executor ya que no usaremos un pool de hilos
-# async def safe_run_in_executor(func, *args):
-#     ...
+async def run_in_executor(func, *args):
+    """Ejecuta una función síncrona en el executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(executor, func, *args)
+
 
 # ==========================
 # HANDLERS (ASÍNCRONOS)
 # ==========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja el comando /start e inicializa el historial de chat."""
+    """Maneja el comando /start."""
     if 'chat_history' not in context.user_data:
         context.user_data['chat_history'] = []
         context.user_data['message_count'] = 0
     
-    # Llamada síncrona para evitar "Event loop is closed"
-    context.bot.send_message(
+    # Usamos await, ya que PTB maneja el loop dentro de los handlers
+    await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text="¡Bienvenido/a! Soy PazOhrBot, su acompañante virtual para el bienestar emocional. "
              "Puede compartir cómo se siente y le asistiré para encontrar la calma y el equilibrio."
@@ -107,23 +107,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         current_contents = chat_history + [{"role": "user", "parts": [{"text": user_text}]}]
 
-    # Se inicializa con el mensaje de error general, se sobrescribe con la respuesta de Gemini
+    # Se inicializa con el mensaje de error general
     reply = "Disculpe, ha ocurrido un error al procesar su solicitud."
     
-    # Ejecutamos la llamada a Gemini DIRECTAMENTE (SÍNCRONA)
-    reply = generate_response_sync(current_contents)
-    
-    # 4. Actualizar el historial (Solo si la respuesta no es el mensaje de error de fallback)
-    if not reply.startswith("Lo siento, hubo un error"):
-        new_history = current_contents + [{"role": "model", "parts": [{"text": reply}]}]
-        context.user_data['chat_history'] = new_history
-    else:
-        logger.warning("Gemini devolvió el mensaje de error de fallback. No se actualizará el historial.")
+    # Ejecutamos la llamada a Gemini ASÍNCRONAMENTE en el executor
+    try:
+        reply = await run_in_executor(generate_response_sync, current_contents)
+        
+        # 4. Actualizar el historial (Solo si la respuesta no es el mensaje de error de fallback)
+        if not reply.startswith("Lo siento, hubo un error"):
+            new_history = current_contents + [{"role": "model", "parts": [{"text": reply}]}]
+            context.user_data['chat_history'] = new_history
+        else:
+            logger.warning("Gemini devolvió el mensaje de error de fallback. No se actualizará el historial.")
+            
+    except Exception as e:
+        logger.error(f"Error fatal al ejecutar Gemini: {e}")
         
     # 5. Enviar respuesta principal
     try:
-        # Llamada síncrona para evitar "Event loop is closed"
-        context.bot.send_message(
+        # Usamos await, ya que la ejecución está protegida dentro del handler de PTB.
+        await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=reply
         )
@@ -135,14 +139,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if message_count % 4 == 0:
         consejo_prompt = "Proporcione un consejo breve y profesional para manejar el estrés o mejorar el bienestar emocional."
         
-        # Ejecutamos el consejo también de forma SÍNCRONA
-        consejo = generate_response_sync(
+        # Ejecutamos el consejo también ASÍNCRONAMENTE en el executor
+        consejo = await run_in_executor(
+            generate_response_sync, 
             [{"role": "user", "parts": [{"text": consejo_prompt}]}]
         )
         
         try:
-            # Llamada síncrona para evitar "Event loop is closed"
-            context.bot.send_message(
+            await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=f"💡 Un pensamiento para su bienestar: {consejo}"
             )
@@ -165,7 +169,7 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # ==========================
-# WEBHOOK CONFIGURATION (Simplified and Stable for Production)
+# WEBHOOK CONFIGURATION (Background Task Processing)
 # ==========================
 app = Flask(__name__)
 
@@ -190,7 +194,6 @@ async def setup_webhook():
 
 # Ejecutar setup al iniciar el script
 try:
-    # Usamos asyncio.run() para ejecutar setup_webhook y esperar a que termine
     asyncio.run(setup_webhook())
 except Exception as e:
     logger.error(f"❌ Error fatal al ejecutar asyncio.run(setup_webhook): {e}")
@@ -199,30 +202,28 @@ except Exception as e:
 @app.route(f"/{TOKEN}", methods=["POST"])
 async def webhook(): 
     """
-    Maneja las actualizaciones de Telegram recibidas por el webhook.
-    Convierte la solicitud JSON en un objeto Update y lo procesa.
+    Maneja las actualizaciones de Telegram recibidas.
+    🚨 CRUCIAL: Ejecuta el procesamiento en una tarea separada para devolver 200 OK inmediatamente.
     """
     logger.info("🟢 Webhook recibido de Telegram. Enviando a cola de procesamiento de PTB.")
     
     try:
-        # request.get_json() devuelve un dict síncrono.
         update_json = request.get_json()
         
         if update_json is None:
-            logger.error("❌ Webhook recibido con cuerpo vacío o no JSON.")
             return "OK", 200 
             
         update = Update.de_json(update_json, application.bot)
         
-        # application.process_update es async y maneja la ejecución de handlers.
-        await application.process_update(update)
+        # Iniciar el procesamiento del update en segundo plano, sin esperar.
+        # Esto libera el hilo web inmediatamente para evitar el timeout.
+        asyncio.create_task(application.process_update(update))
         
-        # Telegram necesita una respuesta 200 OK inmediatamente.
+        # DEVOLVEMOS 200 OK INMEDIATAMENTE A TELEGRAM.
         return "OK", 200
         
     except Exception as e:
         logger.error(f"❌ Error procesando el webhook: {e}")
-        # Siempre devolvemos 200 OK para evitar reintentos infinitos de Telegram.
         return "OK", 200
 
 @app.route("/")
