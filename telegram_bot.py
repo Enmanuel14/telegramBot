@@ -43,7 +43,8 @@ Responde de forma cálida, reflexiva y en español.
 Mantente enfocado en el bienestar del usuario.
 Responde de forma concisa, no más de 4 oraciones - Eres de Nicaragua."""
 
-MODEL_NAME = "gemini-1.5-flash"
+# **CAMBIO AQUÍ: Usar gemini-2.5-flash para compatibilidad con la API V1Beta**
+MODEL_NAME = "gemini-2.5-flash" 
 client = genai.Client(api_key=GEMINI_API_KEY)
 # Pool de hilos para ejecutar llamadas síncronas a Gemini y manejar updates aisladamente
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=10) 
@@ -66,8 +67,9 @@ def generate_response_sync(prompt: str):
         )
         return response.text.strip()
     except Exception as e:
-        logger.error(f"Error al llamar a Gemini: {e}")
-        return "Disculpá, tuve un pequeño fallo técnico. ¿Podrías repetirme lo que me decías? 🙏"
+        # Detalle de log mejorado
+        logger.error(f"Error al llamar a Gemini (Modelo: {MODEL_NAME}): {e}")
+        return "Disculpá, tuve un pequeño fallo técnico con la IA. ¿Podrías repetirme lo que me decías? 🙏"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
