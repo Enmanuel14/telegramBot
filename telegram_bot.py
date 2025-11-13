@@ -191,10 +191,18 @@ async def webhook():
     logger.info("🟢 Webhook recibido de Telegram. Enviando a cola de procesamiento de PTB.")
     
     try:
-        # Flask 3.0.3 con [async] soporta await. 
-        # Obtenemos el cuerpo JSON y lo pasamos al método de procesamiento directo de PTB.
-        # Esto elimina la necesidad de acceder a un 'handler' global.
-        update = Update.de_json(await request.get_json(), application.bot)
+        # CORRECCIÓN CLAVE: request.get_json() devuelve un dict síncrono.
+        # No necesita 'await'.
+        update_json = request.get_json()
+        
+        # Aseguramos que recibimos un cuerpo válido antes de intentar procesar
+        if update_json is None:
+            logger.error("❌ Webhook recibido con cuerpo vacío o no JSON.")
+            return "OK", 200 # Devolvemos 200 OK de todas formas.
+            
+        update = Update.de_json(update_json, application.bot)
+        
+        # application.process_update es async y maneja la ejecución de handlers.
         await application.process_update(update)
         
         # Telegram necesita una respuesta 200 OK inmediatamente.
