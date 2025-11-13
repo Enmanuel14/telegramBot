@@ -1,5 +1,6 @@
 import os
 import asyncio
+import concurrent.futures
 from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -29,12 +30,11 @@ if not all([TOKEN, GEMINI_API_KEY, RAILWAY_URL]):
     logger.error("🚨 FALTA UNA VARIABLE DE ENTORNO CRÍTICA (TELEGRAM_TOKEN, GEMINI_API_KEY, o RAILWAY_URL).")
     exit(1)
 else:
-    # Verificamos que el URL para el webhook no tenga el prefijo https://
     RAILWAY_URL = RAILWAY_URL.replace("https://", "")
     logger.info(f"✅ Variables cargadas. Webhook URL base: https://{RAILWAY_URL}/{TOKEN}")
 
 # ==========================
-# CONFIGURACIÓN DEL SISTEMA
+# CONFIGURACIÓN DEL SISTEMA Y CLIENTE GEMINI
 # ==========================
 SYSTEM_PROMPT = """Eres un psicólogo virtual llamado PazOhrBot.
 Tu objetivo es proporcionar apoyo, consejos de bienestar emocional y mantener una conversación empática y confidencial.
@@ -44,21 +44,21 @@ Responde de forma concisa, no más de 4 oraciones - Eres de Nicaragua."""
 
 MODEL_NAME = "gemini-1.5-flash"
 client = genai.Client(api_key=GEMINI_API_KEY)
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=5) # Ejecutor para tareas en segundo plano
 
 # ==========================
-# FUNCIONES
+# FUNCIONES (Ahora síncronas, se ejecutan en el ThreadPool)
 # ==========================
-async def generate_response(prompt: str):
+def generate_response_sync(prompt: str):
     """
-    Genera una respuesta de Gemini de forma asíncrona, ejecutando la llamada síncrona
-    de la API en un hilo separado para no bloquear el bucle de eventos.
+    Genera una respuesta de Gemini de forma SÍNCRONA. 
+    Esta función se llamará dentro de un ThreadPool.
     """
     full_prompt = f"{SYSTEM_PROMPT}\n\nUsuario: {prompt}\nPazOhrBot:"
     
     try:
-        # Ejecuta la llamada síncrona de la API en un hilo
-        response = await asyncio.to_thread(
-            client.models.generate_content,
+        # La llamada es síncrona
+        response = client.models.generate_content(
             model=MODEL_NAME,
             contents=full_prompt
         )
@@ -76,38 +76,46 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja mensajes de texto y genera la respuesta con Gemini."""
+    """
+    Maneja mensajes de texto. La generación de Gemini se hace 
+    en un hilo (síncrona), y el envío de Telegram es asíncrono.
+    """
     
-    # Usar context.user_data para mantener el conteo por usuario
     if 'message_count' not in context.user_data:
         context.user_data['message_count'] = 0
     
     context.user_data['message_count'] += 1
 
-    # Generar respuesta principal (ahora es una función awaitable)
-    reply = await generate_response(update.message.text.strip())
-    
-    # IMPORTANTE: El error 'Event loop is closed' ocurre al enviar la respuesta.
+    # Ejecutar la función síncrona de Gemini en el ThreadPoolExecutor
+    # Esto libera el event loop de Telegram mientras Gemini responde.
+    try:
+        reply = await asyncio.get_event_loop().run_in_executor(
+            executor,
+            generate_response_sync,
+            update.message.text.strip()
+        )
+    except Exception as e:
+        logger.error(f"Error al ejecutar Gemini en el ThreadPool: {e}")
+        reply = "Disculpá, hubo un problema al procesar tu solicitud."
+
+    # Enviar respuesta principal
     try:
         await update.message.reply_text(reply)
     except Exception as e:
-        logger.error(f"Error al enviar la respuesta principal a Telegram: {e}")
-        # Intentamos enviar un mensaje de fallback síncrono para notificar el fallo
-        try:
-             # Usamos el bot en modo síncrono como último recurso, aunque es menos eficiente.
-             context.bot.send_message(
-                chat_id=update.effective_chat.id, 
-                text="⚠️ Lo siento, no pude enviar la respuesta completa. Error de red interno."
-            )
-        except Exception as fallback_e:
-            logger.error(f"Fallo el fallback síncrono: {fallback_e}")
-            return
+        logger.error(f"Error al enviar la respuesta principal a Telegram: {e}. Causa probable: Event loop cerrado.")
         return 
         
     # Cada 4 mensajes: dar consejo adicional
     if context.user_data['message_count'] % 4 == 0:
         consejo_prompt = "Dame un consejo breve para manejar el estrés o mejorar el bienestar emocional."
-        consejo = await generate_response(consejo_prompt)
+        
+        # Generar el consejo en el ThreadPoolExecutor
+        consejo = await asyncio.get_event_loop().run_in_executor(
+            executor,
+            generate_response_sync,
+            consejo_prompt
+        )
+        
         try:
             await update.message.reply_text(f"💡 Un pequeño pensamiento extra: {consejo}")
         except Exception as e:
@@ -117,12 +125,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================
 # CONFIGURAR APLICACIÓN TELEGRAM
 # ==========================
-# **CAMBIO CLAVE 1: Inicialización síncrona. 
-# La aplicación debe estar lista antes de que Gunicorn la use.**
 application = (
     Application.builder()
     .token(TOKEN)
-    .get_updates_pool_timeout(5) # Ajuste para entornos de servidor
+    .get_updates_pool_timeout(5) 
     .build()
 )
 
@@ -134,26 +140,21 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_m
 # WEBHOOK PARA RAILWAY (FLASK)
 # ==========================
 app = Flask(__name__)
-# Variable para asegurar que el webhook se establezca solo una vez
 webhook_set = False
 
-# **CAMBIO CLAVE 2: Inicialización síncrona garantizada antes del primer request**
+# Inicialización síncrona garantizada antes del primer request
 @app.before_first_request
 def setup_webhook_once():
-    """
-    Ejecuta la inicialización síncrona del bot y establece el webhook. 
-    Se ejecuta una sola vez antes de que se sirva la primera petición.
-    """
+    """Ejecuta la inicialización del bot y establece el webhook de forma síncrona."""
     global webhook_set
     if webhook_set:
         return
         
     try:
-        # La inicialización debe ser síncrona en este contexto de Flask/Gunicorn startup
         application.initialize()
         webhook_url = f"https://{RAILWAY_URL}/{TOKEN}"
         
-        # Sincronizamos la llamada al bot para establecer el webhook
+        # Usamos asyncio.run() para ejecutar el set_webhook síncrona
         asyncio.run(application.bot.set_webhook(webhook_url))
         
         logger.info(f"✅ Webhook establecido correctamente en: {webhook_url}")
@@ -166,14 +167,14 @@ def setup_webhook_once():
 async def webhook():
     """Maneja las actualizaciones de Telegram recibidas por el webhook."""
     try:
-        # Procesar la actualización con el bot asíncrono
+        # 1. Obtener la actualización
         json_update = await request.get_json(force=True)
         update = Update.de_json(json_update, application.bot)
         
-        # Usamos application.update_queue para inyectar la actualización 
-        # en el contexto de ejecución del bot, evitando problemas de event loop.
+        # 2. Procesar la actualización. Esto se ejecutará en el event loop de Flask/Gunicorn
         await application.process_update(update)
         
+        # 3. Retornar OK inmediatamente
         return "OK", 200
     except Exception as e:
         logger.error(f"Error procesando el webhook: {e}")
@@ -184,6 +185,3 @@ async def webhook():
 def home():
     """Ruta para verificar que el servidor está activo."""
     return "PazOhrBot está activo y esperando webhooks. 🕊️", 200
-
-# El servidor es iniciado por Gunicorn en Railway. No se necesita app.run().
-# La variable 'app' es la instancia de Flask que Gunicorn cargará.
