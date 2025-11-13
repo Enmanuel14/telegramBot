@@ -7,7 +7,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from google import genai
 from dotenv import load_dotenv
 import logging
-import threading # Necesario para obtener el loop actual del hilo
+import threading 
 
 # Configuración de logs para ver más detalles en Railway
 logging.basicConfig(
@@ -56,19 +56,15 @@ executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
 def generate_response_sync(contents: list):
     """
     Genera una respuesta de Gemini de forma SÍNCRONA. 
-    Acepta el historial de chat COMPLETO incluyendo el turno del usuario actual.
-    
-    CORRECCIÓN CLAVE: Usamos 'generation_config' para pasar la instrucción del sistema
-    porque la librería google-genai 0.3.0 no acepta 'system_instruction' como argumento directo.
+    Usa la sintaxis 'system_instruction' para la versión 0.3.0 de google-genai.
     """
     
     try:
-        # La llamada es síncrona
+        # CORRECCIÓN CLAVE: Usamos 'system_instruction' como argumento directo.
         response = client.models.generate_content(
             model=MODEL_NAME,
             contents=contents, # Enviamos el historial completo
-            # La instrucción del sistema se pasa dentro de generation_config
-            generation_config={"system_instruction": SYSTEM_PROMPT} 
+            system_instruction=SYSTEM_PROMPT 
         )
         return response.text.strip()
     except Exception as e:
@@ -84,8 +80,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['chat_history'] = []
     context.user_data['message_count'] = 0
     
-    # CORRECCIÓN CLAVE: Usar la función síncrona de Telegram para enviar la respuesta 
-    # desde un hilo del pool, previniendo el error "Event loop is closed".
+    # Usar context.bot.send_message para mayor estabilidad en el ThreadPool
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text="¡Bienvenido/a! Soy PazOhrBot, su acompañante virtual para el bienestar emocional. "
@@ -104,37 +99,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_count += 1
     user_text = update.message.text.strip()
     
-    # 2. **PASO CLAVE DE MEMORIA**: Agregar el mensaje actual del usuario al historial
+    # 2. Agregar el mensaje actual del usuario al historial
     current_contents = chat_history + [{"role": "user", "parts": [{"text": user_text}]}]
 
     # 3. Ejecutar la función síncrona de Gemini en el ThreadPoolExecutor
     reply = "Disculpe, ha ocurrido un error al procesar su solicitud."
     
     try:
-        # Usamos el loop del hilo actual para ejecutar la función síncrona
-        loop = asyncio.get_event_loop()
-        if not loop.is_running():
-            current_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(current_loop)
-        
-        # Ejecutamos la función síncrona de Gemini
+        # CORRECCIÓN CLAVE: Eliminamos el manejo manual de los loops.
+        # run_in_executor utiliza el loop ya activo.
         reply = await asyncio.get_event_loop().run_in_executor(
             executor,
             generate_response_sync,
             current_contents
         )
         
-        # 4. **PASO CLAVE DE MEMORIA**: Actualizar el historial después de la respuesta exitosa
+        # 4. Actualizar el historial después de la respuesta exitosa
         new_history = current_contents + [{"role": "model", "parts": [{"text": reply}]}]
         context.user_data['chat_history'] = new_history
         
     except Exception as e:
         logger.error(f"Error al ejecutar Gemini en el ThreadPool: {e}")
-        # Si falla Gemini, el reply se mantiene con el mensaje de error predeterminado
         
-    # 5. Enviar respuesta principal (USANDO LA CORRECCIÓN CLAVE)
+    # 5. Enviar respuesta principal
     try:
-        # Usar context.bot.send_message en lugar de update.message.reply_text para estabilidad
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=reply
