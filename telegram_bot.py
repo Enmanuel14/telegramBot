@@ -94,7 +94,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # 3. Ejecutamos la llamada síncrona de Gemini en el pool de hilos de forma asíncrona
-        reply = await context.application.loop.run_in_executor(
+        # CORRECCIÓN: Usamos asyncio.get_running_loop() en lugar de application.loop
+        loop = asyncio.get_running_loop()
+        reply = await loop.run_in_executor(
             executor, 
             generate_response_sync, 
             current_contents
@@ -121,7 +123,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if message_count % 4 == 0:
         consejo_prompt = "Proporcione un consejo breve y profesional para manejar el estrés o mejorar el bienestar emocional."
         
-        consejo = await context.application.loop.run_in_executor(
+        # CORRECCIÓN: Usamos asyncio.get_running_loop() en lugar de application.loop
+        loop = asyncio.get_running_loop()
+        consejo = await loop.run_in_executor(
             executor, 
             generate_response_sync, 
             [{"role": "user", "parts": [{"text": consejo_prompt}]}]
@@ -191,14 +195,12 @@ async def webhook():
     logger.info("🟢 Webhook recibido de Telegram. Enviando a cola de procesamiento de PTB.")
     
     try:
-        # CORRECCIÓN CLAVE: request.get_json() devuelve un dict síncrono.
-        # No necesita 'await'.
+        # request.get_json() devuelve un dict síncrono.
         update_json = request.get_json()
         
-        # Aseguramos que recibimos un cuerpo válido antes de intentar procesar
         if update_json is None:
             logger.error("❌ Webhook recibido con cuerpo vacío o no JSON.")
-            return "OK", 200 # Devolvemos 200 OK de todas formas.
+            return "OK", 200 
             
         update = Update.de_json(update_json, application.bot)
         
