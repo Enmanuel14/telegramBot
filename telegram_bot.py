@@ -216,9 +216,13 @@ def webhook():
         json_update = request.get_json(force=True)
         update = Update.de_json(json_update, application.bot)
         
-        # FIX FINAL: Usar run_coroutine_threadsafe para delegar la corrutina 
+        # FIX DEFINITIVO para AttributeError: 'Application' object has no attribute 'loop'
+        # Usamos el loop interno del dispatcher para asegurar que está corriendo y es accesible.
+        event_loop = application.updater.dispatcher.loop
+        
+        # Usar run_coroutine_threadsafe para delegar la corrutina 
         # (Application.process_update es async) al event loop del PTB.
-        asyncio.run_coroutine_threadsafe(application.process_update(update), application.loop)
+        asyncio.run_coroutine_threadsafe(application.process_update(update), event_loop)
         
         # Retornar OK inmediatamente.
         return "OK", 200
