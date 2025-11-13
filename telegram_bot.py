@@ -150,36 +150,35 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # ==========================
-# WEBHOOK CONFIGURATION
+# WEBHOOK CONFIGURATION (Simplified for Production)
 # ==========================
 app = Flask(__name__)
-
-# --- CORRECCIÓN CLAVE: Usar application.updater.webhook_handler ---
-# La instancia de Updater se crea en Application.start() o run_webhook().
-# Sin embargo, en la versión 21 de PTB, el handler es un atributo del Updater.
-# Al llamar application.run_webhook(), PTB prepara su Updater.
+# Variable para almacenar el handler después de la inicialización asíncrona
+webhook_handler = None 
 
 # Inicializar y configurar el Webhook
 async def setup_webhook():
-    """Inicializa la aplicación y configura el webhook."""
+    """Inicializa la aplicación y configura el webhook de Telegram."""
+    global webhook_handler
+    
     try:
         await application.initialize()
         
-        # Arrancamos el PTB Application en modo webhook. 
-        # Esto configura el Updater y el WebhookHandler.
         webhook_url = f"https://{RAILWAY_URL}/{TOKEN}"
         
-        await application.updater.start_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=TOKEN,
-            webhook_url=webhook_url
-        )
+        # Seteamos el Webhook en Telegram
+        await application.bot.set_webhook(webhook_url)
+        
+        # Arrancamos la Application de PTB
+        await application.start()
+        
+        # Guardamos el handler después de iniciar la aplicación
+        # Usamos el getter de PTB para obtener el handler correcto
+        webhook_handler = application.updater.bot_instance.updater.get_webhook_handler()
         
         logger.info(f"✅ Application iniciada y Webhook establecido en: {webhook_url}")
     except Exception as e:
         logger.error(f"❌ Error durante la inicialización asíncrona: {e}.")
-        # Si la inicialización falla, salimos.
         raise
 
 # Ejecutar setup al iniciar el script
@@ -189,10 +188,6 @@ try:
 except Exception as e:
     logger.error(f"❌ Error fatal al ejecutar asyncio.run(setup_webhook): {e}")
 
-# Ahora, el handler ya existe después de llamar a setup_webhook
-handler = application.updater.webhook_handler
-
-
 @app.route(f"/{TOKEN}", methods=["POST"])
 async def webhook(): 
     """
@@ -201,10 +196,14 @@ async def webhook():
     """
     logger.info("🟢 Webhook recibido de Telegram. Enviando a cola de procesamiento de PTB.")
     
+    if not webhook_handler:
+        logger.error("❌ Webhook recibido pero el handler de PTB no está inicializado.")
+        return "Internal Error", 500
+
     try:
         # El handler.handle_update es un método async que usa los datos brutos del request.
         # Devuelve la respuesta HTTP correcta (200 OK) automáticamente.
-        return await handler.handle_update(request.get_data())
+        return await webhook_handler.handle_update(request.get_data())
     except Exception as e:
         logger.error(f"❌ Error procesando el webhook: {e}")
         # Si falla, devolvemos un 200 para evitar reintentos de Telegram, pero con log de error.
