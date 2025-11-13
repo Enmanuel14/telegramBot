@@ -7,7 +7,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from google import genai
 from dotenv import load_dotenv
 import logging
-# Eliminamos 'threading' ya que no lo necesitamos explícitamente
 
 # Configuración de logs para ver más detalles en Railway
 logging.basicConfig(
@@ -31,7 +30,6 @@ if not all([TOKEN, GEMINI_API_KEY, RAILWAY_URL]):
     logger.error("🚨 FALTA UNA VARIABLE DE ENTORNO CRÍTICA (TELEGRAM_TOKEN, GEMINI_API_KEY, o RAILWAY_URL).")
     exit(1)
 else:
-    # Limpiamos el URL por si tiene el prefijo https://
     RAILWAY_URL = RAILWAY_URL.replace("https://", "")
     logger.info(f"✅ Variables cargadas. Webhook URL base: https://{RAILWAY_URL}/{TOKEN}")
 
@@ -46,17 +44,14 @@ Responde de forma concisa, no más de 4 oraciones."""
 
 MODEL_NAME = "gemini-2.5-flash" 
 client = genai.Client(api_key=GEMINI_API_KEY)
-# Pool de hilos para manejar la concurrencia de Flask y ejecutar Gemini
-# Mantenemos el executor solo para las llamadas SÍNCRONAS de Gemini
+# Pool de hilos para Gemini
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=10) 
 
 # ==========================
-# FUNCIONES (Síncronas para Gemini)
+# HANDLERS (ASÍNCRONOS)
 # ==========================
 def generate_response_sync(contents: list):
-    """
-    Genera una respuesta de Gemini de forma SÍNCRONA. 
-    """
+    """Genera una respuesta de Gemini de forma SÍNCRONA."""
     try:
         response = client.models.generate_content(
             model=MODEL_NAME,
@@ -64,14 +59,11 @@ def generate_response_sync(contents: list):
         )
         return response.text.strip()
     except Exception as e:
-        logger.error(f"Error al llamar a Gemini (Modelo: {MODEL_NAME}): {e}")
-        return "Disculpe, he experimentado un inconveniente técnico con la inteligencia artificial. ¿Podría reiterar su mensaje? Agradezco su comprensión."
-
+        logger.error(f"Error al llamar a Gemini: {e}")
+        return "Disculpe, he experimentado un inconveniente técnico con la IA. ¿Podría reiterar su mensaje? Agradezco su comprensión."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Maneja el comando /start e inicializa el historial de chat."""
-    
-    # Es crucial inicializar user_data
     if 'chat_history' not in context.user_data:
         context.user_data['chat_history'] = []
         context.user_data['message_count'] = 0
@@ -83,37 +75,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Maneja mensajes de texto, guarda el historial de chat y genera la respuesta.
-    """
+    """Maneja mensajes de texto, guarda el historial de chat y genera la respuesta."""
     
-    # Aseguramos que las claves existan
     chat_history = context.user_data.get('chat_history', [])
     message_count = context.user_data.get('message_count', 0)
-    
     message_count += 1
     user_text = update.message.text.strip()
     
-    # 2. **MEMORIA GEMINI**: Inyectar SYSTEM_PROMPT en el primer mensaje
+    # 2. **MEMORIA GEMINI**: Inyectar SYSTEM_PROMPT (Lógica solicitada)
     if not chat_history:
         user_content = f"{SYSTEM_PROMPT}\n\nUSER QUERY: {user_text}"
         current_contents = [{"role": "user", "parts": [{"text": user_content}]}]
     else:
         current_contents = chat_history + [{"role": "user", "parts": [{"text": user_text}]}]
 
-    # 3. Ejecutar la función síncrona de Gemini
     reply = "Disculpe, ha ocurrido un error al procesar su solicitud."
     
     try:
-        # Ejecutamos la llamada síncrona de Gemini en el pool de hilos
-        # Esto es seguro porque el ThreadPoolExecutor maneja la ejecución bloqueante
+        # 3. Ejecutamos la llamada síncrona de Gemini en el pool de hilos de forma asíncrona
         reply = await context.application.loop.run_in_executor(
             executor, 
             generate_response_sync, 
             current_contents
         )
         
-        # 4. Actualizar el historial después de la respuesta exitosa
+        # 4. Actualizar el historial
         new_history = current_contents + [{"role": "model", "parts": [{"text": reply}]}]
         context.user_data['chat_history'] = new_history
         
@@ -122,7 +108,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     # 5. Enviar respuesta principal
     try:
-        # Esta llamada es asíncrona y corre dentro del loop de PTB, lo que es seguro.
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=reply
@@ -135,7 +120,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if message_count % 4 == 0:
         consejo_prompt = "Proporcione un consejo breve y profesional para manejar el estrés o mejorar el bienestar emocional."
         
-        # Generar el consejo de forma síncrona
         consejo = await context.application.loop.run_in_executor(
             executor, 
             generate_response_sync, 
@@ -153,7 +137,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Guardar el contador actualizado
     context.user_data['message_count'] = message_count
 
-
 # ==========================
 # CONFIGURAR APLICACIÓN TELEGRAM
 # ==========================
@@ -166,78 +149,59 @@ application = (
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# ** NUEVA VARIABLE GLOBAL PARA ALMACENAR EL EVENT LOOP **
-global_loop = None
-
 # ==========================
-# WEBHOOK PARA RAILWAY (FLASK) - Versión Final Simplificada
+# WEBHOOK CONFIGURATION
 # ==========================
 app = Flask(__name__)
-webhook_set = False
+# Crear una instancia de WebhookHandler que maneja el bucle de eventos
+handler = application.get_webhook_handler()
 
-# **Inicialización: Solo seteo de Webhook y arranque del Application**
+# Inicializar y configurar el Webhook
 async def setup_webhook():
-    """Inicializa la aplicación, configura el webhook y la arranca (sin loop de polling)."""
-    global webhook_set
-    global global_loop # Acceder a la variable global
+    """Inicializa la aplicación y configura el webhook."""
     try:
         await application.initialize()
         webhook_url = f"https://{RAILWAY_URL}/{TOKEN}"
         
-        # El comando 'set_webhook' se ejecuta primero para asegurar la conexión.
+        # Seteamos el Webhook
         await application.bot.set_webhook(webhook_url)
         
-        # Iniciar las tareas internas del PTB (handlers, etc.) para que el contexto esté listo
-        # Esto también inicia el event loop de la aplicación.
-        await application.start() 
+        # Arrancamos el PTB Application para que esté listo para procesar
+        await application.start()
         
-        # *** ALMACENAR LA REFERENCIA DEL LOOP CREADO ***
-        global_loop = asyncio.get_running_loop()
-        
-        webhook_set = True
-        logger.info(f"✅ Application iniciada. Webhook establecido en: {webhook_url}")
+        logger.info(f"✅ Application iniciada y Webhook establecido en: {webhook_url}")
     except Exception as e:
         logger.error(f"❌ Error durante la inicialización asíncrona: {e}.")
-        webhook_set = False
+        # Si la inicialización falla, salimos.
+        raise
 
 # Ejecutar setup al iniciar el script
 try:
     # Usamos asyncio.run() para ejecutar setup_webhook y esperar a que termine
     asyncio.run(setup_webhook())
 except Exception as e:
-    logger.error(f"❌ Error al ejecutar asyncio.run(setup_webhook): {e}")
+    logger.error(f"❌ Error fatal al ejecutar asyncio.run(setup_webhook): {e}")
 
 
 @app.route(f"/{TOKEN}", methods=["POST"])
-def webhook(): 
+async def webhook(): 
     """
     Maneja las actualizaciones de Telegram recibidas por el webhook.
-    Programa la corrutina de procesamiento en el loop almacenado globalmente.
+    El WebhookHandler de PTB se encarga de llamar al bucle de eventos.
     """
     logger.info("🟢 Webhook recibido de Telegram. Enviando a cola de procesamiento de PTB.")
     
-    if not webhook_set:
-        logger.error("❌ Recibido webhook, pero la inicialización falló o no se completó.")
-        return "Error", 500
-        
+    # El método process_update_async del handler se encarga de procesar la actualización 
+    # y de la respuesta 200/OK.
     try:
-        json_update = request.get_json(force=True)
-        update = Update.de_json(json_update, application.bot)
-        
-        # Acceder al loop almacenado globalmente
-        if global_loop is None:
-             logger.error("❌ Error: global_loop no está configurado. La inicialización falló o no se completó.")
-             return "OK", 200
-        
-        # Usar run_coroutine_threadsafe para delegar la corrutina 
-        # (Application.process_update es async) al event loop ALMACENADO.
-        asyncio.run_coroutine_threadsafe(application.process_update(update), global_loop)
-        
-        # Retornar OK inmediatamente.
-        return "OK", 200
+        # Usamos el handler de PTB para procesar la actualización de forma asíncrona
+        # NOTA: En un entorno de producción con WSGI, Flask a menudo necesita ser asíncrono.
+        # Ya que Flask 3.0.3 soporta async, definimos esta función como async.
+        return await handler.handle_update(request.get_data())
     except Exception as e:
         logger.error(f"❌ Error procesando el webhook: {e}")
-        return "OK", 200 
+        # Si falla, devolvemos un 200 para evitar reintentos de Telegram, pero con log de error.
+        return "OK", 200
 
 @app.route("/")
 def home():
@@ -248,4 +212,5 @@ def home():
 # BLOQUE DE EJECUCIÓN (Asegura que Gunicorn/Flask inicie)
 # ==========================
 if __name__ == "__main__":
+    # Importante: Como `webhook` es ahora `async`, Flask necesita el paquete [async].
     app.run(host="0.0.0.0", port=PORT)
