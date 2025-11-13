@@ -1,6 +1,7 @@
 import os
 import asyncio
 import concurrent.futures
+import json
 from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -150,17 +151,13 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # ==========================
-# WEBHOOK CONFIGURATION (Simplified for Production)
+# WEBHOOK CONFIGURATION (Simplified and Stable for Production)
 # ==========================
 app = Flask(__name__)
-# Variable para almacenar el handler después de la inicialización asíncrona
-webhook_handler = None 
 
 # Inicializar y configurar el Webhook
 async def setup_webhook():
     """Inicializa la aplicación y configura el webhook de Telegram."""
-    global webhook_handler
-    
     try:
         await application.initialize()
         
@@ -171,10 +168,6 @@ async def setup_webhook():
         
         # Arrancamos la Application de PTB
         await application.start()
-        
-        # Guardamos el handler después de iniciar la aplicación
-        # Usamos el getter de PTB para obtener el handler correcto
-        webhook_handler = application.updater.bot_instance.updater.get_webhook_handler()
         
         logger.info(f"✅ Application iniciada y Webhook establecido en: {webhook_url}")
     except Exception as e:
@@ -188,25 +181,28 @@ try:
 except Exception as e:
     logger.error(f"❌ Error fatal al ejecutar asyncio.run(setup_webhook): {e}")
 
+
 @app.route(f"/{TOKEN}", methods=["POST"])
 async def webhook(): 
     """
     Maneja las actualizaciones de Telegram recibidas por el webhook.
-    Usa el WebhookHandler de PTB para llamar al bucle de eventos.
+    Convierte la solicitud JSON en un objeto Update y lo procesa.
     """
     logger.info("🟢 Webhook recibido de Telegram. Enviando a cola de procesamiento de PTB.")
     
-    if not webhook_handler:
-        logger.error("❌ Webhook recibido pero el handler de PTB no está inicializado.")
-        return "Internal Error", 500
-
     try:
-        # El handler.handle_update es un método async que usa los datos brutos del request.
-        # Devuelve la respuesta HTTP correcta (200 OK) automáticamente.
-        return await webhook_handler.handle_update(request.get_data())
+        # Flask 3.0.3 con [async] soporta await. 
+        # Obtenemos el cuerpo JSON y lo pasamos al método de procesamiento directo de PTB.
+        # Esto elimina la necesidad de acceder a un 'handler' global.
+        update = Update.de_json(await request.get_json(), application.bot)
+        await application.process_update(update)
+        
+        # Telegram necesita una respuesta 200 OK inmediatamente.
+        return "OK", 200
+        
     except Exception as e:
         logger.error(f"❌ Error procesando el webhook: {e}")
-        # Si falla, devolvemos un 200 para evitar reintentos de Telegram, pero con log de error.
+        # Siempre devolvemos 200 OK para evitar reintentos infinitos de Telegram.
         return "OK", 200
 
 @app.route("/")
@@ -218,5 +214,4 @@ def home():
 # BLOQUE DE EJECUCIÓN (Asegura que Gunicorn/Flask inicie)
 # ==========================
 if __name__ == "__main__":
-    # Flask 3.0.3 con [async] maneja la función async webhook() correctamente.
     app.run(host="0.0.0.0", port=PORT)
