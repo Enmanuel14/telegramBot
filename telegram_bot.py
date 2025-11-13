@@ -11,7 +11,8 @@ import threading
 
 # Configuración de logs para ver más detalles en Railway
 logging.basicConfig(
-    format="%(asctime)s - %(name__s) - %(levelname)s - %(message)s",
+    # FIX: Cambiado 'name__s' a 'name'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
