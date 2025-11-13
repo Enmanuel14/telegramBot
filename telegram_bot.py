@@ -77,6 +77,7 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_m
 def webhook():
     json_update = request.get_json(force=True)
     update = Update.de_json(json_update, application.bot)
+    asyncio.run(application.initialize())
     asyncio.run(application.process_update(update))
     return "OK", 200
 
@@ -97,4 +98,5 @@ if __name__ == "__main__":
 
     asyncio.run(main())
     app.run(host="0.0.0.0", port=PORT)
+
 
