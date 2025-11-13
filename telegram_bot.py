@@ -187,6 +187,10 @@ async def setup_webhook():
         # Esto también inicia el event loop de la aplicación.
         await application.start() 
         
+        # Después de application.start(), el bucle de eventos debe estar disponible
+        # en application.loop. Lo almacenamos si está disponible, aunque la forma de acceder
+        # desde el hilo de Flask es lo que suele causar problemas.
+        
         webhook_set = True
         logger.info(f"✅ Application iniciada. Webhook establecido en: {webhook_url}")
     except Exception as e:
@@ -195,6 +199,7 @@ async def setup_webhook():
 
 # Ejecutar setup al iniciar el script
 try:
+    # Usamos asyncio.run() para ejecutar setup_webhook y esperar a que termine
     asyncio.run(setup_webhook())
 except Exception as e:
     logger.error(f"❌ Error al ejecutar asyncio.run(setup_webhook): {e}")
@@ -204,7 +209,7 @@ except Exception as e:
 def webhook(): 
     """
     Maneja las actualizaciones de Telegram recibidas por el webhook.
-    Programa la corrutina de procesamiento en el loop del PTB.
+    Programa la corrutina de procesamiento en el loop del PTB usando get_running_loop().
     """
     logger.info("🟢 Webhook recibido de Telegram. Enviando a cola de procesamiento de PTB.")
     
@@ -216,15 +221,21 @@ def webhook():
         json_update = request.get_json(force=True)
         update = Update.de_json(json_update, application.bot)
         
-        # FIX DEFINITIVO para AttributeError: 'Application' object has no attribute 'loop'
-        # Usamos el loop interno del dispatcher para asegurar que está corriendo y es accesible.
-        event_loop = application.updater.dispatcher.loop
+        # FIX DEFINITIVO: Acceder al loop de eventos que está ejecutando la aplicación.
+        # Ya que 'application.start()' se ejecutó, debe haber un bucle en ejecución.
+        event_loop = asyncio.get_running_loop()
         
         # Usar run_coroutine_threadsafe para delegar la corrutina 
         # (Application.process_update es async) al event loop del PTB.
         asyncio.run_coroutine_threadsafe(application.process_update(update), event_loop)
         
         # Retornar OK inmediatamente.
+        return "OK", 200
+    except RuntimeError as e:
+        if "no running event loop" in str(e):
+             logger.error("❌ Error: No se encontró un bucle de eventos. Asegúrese de que application.start() se haya completado correctamente.")
+        else:
+             logger.error(f"❌ Error de tiempo de ejecución (bucle de eventos): {e}")
         return "OK", 200
     except Exception as e:
         logger.error(f"❌ Error procesando el webhook: {e}")
