@@ -49,7 +49,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=10) 
 
 # ==========================
-# HANDLERS (ASÍNCRONOS)
+# FUNCIONES AUXILIARES
 # ==========================
 def generate_response_sync(contents: list):
     """Genera una respuesta de Gemini de forma SÍNCRONA."""
@@ -63,6 +63,21 @@ def generate_response_sync(contents: list):
         logger.error(f"Error al llamar a Gemini: {e}")
         return "Disculpe, he experimentado un inconveniente técnico con la IA. ¿Podría reiterar su mensaje? Agradezco su comprensión."
 
+async def safe_run_in_executor(func, *args):
+    """Ejecuta una función síncrona en el executor, manejando el cierre del loop."""
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(executor, func, *args)
+    except RuntimeError as e:
+        # Si el loop se está cerrando o no está disponible, intentamos ejecutar síncrono (caso de emergencia)
+        if 'Event loop is closed' in str(e) or 'no running event loop' in str(e):
+            logger.warning("⚠️ Loop no disponible o cerrado. Ejecutando llamada a Gemini de forma síncrona en el hilo principal.")
+            return func(*args)
+        raise
+
+# ==========================
+# HANDLERS (ASÍNCRONOS)
+# ==========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Maneja el comando /start e inicializa el historial de chat."""
     if 'chat_history' not in context.user_data:
@@ -94,20 +109,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # 3. Ejecutamos la llamada síncrona de Gemini en el pool de hilos de forma asíncrona
-        # CORRECCIÓN: Usamos asyncio.get_running_loop() en lugar de application.loop
-        loop = asyncio.get_running_loop()
-        reply = await loop.run_in_executor(
-            executor, 
-            generate_response_sync, 
-            current_contents
-        )
+        reply = await safe_run_in_executor(generate_response_sync, current_contents)
         
         # 4. Actualizar el historial
         new_history = current_contents + [{"role": "model", "parts": [{"text": reply}]}]
         context.user_data['chat_history'] = new_history
         
     except Exception as e:
-        logger.error(f"Error al ejecutar Gemini de forma síncrona: {e}")
+        logger.error(f"Error al ejecutar Gemini de forma asíncrona: {e}")
         
     # 5. Enviar respuesta principal
     try:
@@ -123,10 +132,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if message_count % 4 == 0:
         consejo_prompt = "Proporcione un consejo breve y profesional para manejar el estrés o mejorar el bienestar emocional."
         
-        # CORRECCIÓN: Usamos asyncio.get_running_loop() en lugar de application.loop
-        loop = asyncio.get_running_loop()
-        consejo = await loop.run_in_executor(
-            executor, 
+        consejo = await safe_run_in_executor(
             generate_response_sync, 
             [{"role": "user", "parts": [{"text": consejo_prompt}]}]
         )
