@@ -8,6 +8,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from google import genai
 from dotenv import load_dotenv
 import logging
+import traceback # Importamos para obtener el stack trace
 
 # Configuración de logs para ver más detalles en Railway
 logging.basicConfig(
@@ -61,7 +62,13 @@ def generate_response_sync(contents: list):
         )
         return response.text.strip()
     except Exception as e:
-        logger.error(f"Error al llamar a Gemini: {e}")
+        # CORRECCIÓN DE LOG: Imprimir el stack trace para debugging
+        error_details = traceback.format_exc()
+        status_code = getattr(e, 'http_status', 'N/A')
+        
+        logger.error(f"❌ Error al llamar a Gemini. HTTP Status: {status_code}. Detalles: {e}")
+        logger.error(f"Stack Trace Completo: {error_details}")
+
         # Este mensaje se enviará si falla la API de Gemini
         return "Lo siento, hubo un error al procesar tu mensaje. Intenta nuevamente más tarde."
 
@@ -100,22 +107,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         current_contents = chat_history + [{"role": "user", "parts": [{"text": user_text}]}]
 
+    # Se inicializa con el mensaje de error general, se sobrescribe con la respuesta de Gemini
     reply = "Disculpe, ha ocurrido un error al procesar su solicitud."
     
-    try:
-        # 3. Ejecutamos la llamada a Gemini DIRECTAMENTE (SÍNCRONA)
-        # Esto bloquea el hilo, pero es más estable que el executor que estaba fallando
-        reply = generate_response_sync(current_contents)
-        
-        # 4. Actualizar el historial (Solo si la respuesta no es el mensaje de error de fallback)
-        if not reply.startswith("Lo siento, hubo un error"):
-            new_history = current_contents + [{"role": "model", "parts": [{"text": reply}]}]
-            context.user_data['chat_history'] = new_history
-        else:
-            logger.error("Gemini devolvió el mensaje de error de fallback.")
-        
-    except Exception as e:
-        logger.error(f"Error al ejecutar Gemini de forma síncrona: {e}")
+    # Ejecutamos la llamada a Gemini DIRECTAMENTE (SÍNCRONA)
+    reply = generate_response_sync(current_contents)
+    
+    # 4. Actualizar el historial (Solo si la respuesta no es el mensaje de error de fallback)
+    if not reply.startswith("Lo siento, hubo un error"):
+        new_history = current_contents + [{"role": "model", "parts": [{"text": reply}]}]
+        context.user_data['chat_history'] = new_history
+    else:
+        logger.warning("Gemini devolvió el mensaje de error de fallback. No se actualizará el historial.")
         
     # 5. Enviar respuesta principal
     try:
