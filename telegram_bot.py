@@ -5,6 +5,19 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from google import genai
 import asyncio
 
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
+RAILWAY_URL = os.getenv("RAILWAY_URL")
+PORT = int(os.getenv("PORT", 8080))
+
+print("TOKEN:", TOKEN)  # 👈 agrega esto temporalmente para ver si Railway lo lee
+
+
 # ==========================
 # CONFIGURACIÓN DEL SISTEMA
 # ==========================
@@ -84,3 +97,4 @@ if __name__ == "__main__":
 
     asyncio.run(main())
     app.run(host="0.0.0.0", port=PORT)
+
