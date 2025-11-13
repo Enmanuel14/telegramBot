@@ -7,11 +7,10 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from google import genai
 from dotenv import load_dotenv
 import logging
-import threading 
+# Eliminamos 'threading' ya que no lo necesitamos explícitamente
 
 # Configuración de logs para ver más detalles en Railway
 logging.basicConfig(
-    # FIX: Cambiado 'name__s' a 'name'
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
     level=logging.INFO
 )
@@ -48,6 +47,7 @@ Responde de forma concisa, no más de 4 oraciones."""
 MODEL_NAME = "gemini-2.5-flash" 
 client = genai.Client(api_key=GEMINI_API_KEY)
 # Pool de hilos para manejar la concurrencia de Flask y ejecutar Gemini
+# Mantenemos el executor solo para las llamadas SÍNCRONAS de Gemini
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=10) 
 
 # ==========================
@@ -71,8 +71,10 @@ def generate_response_sync(contents: list):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Maneja el comando /start e inicializa el historial de chat."""
     
-    context.user_data['chat_history'] = []
-    context.user_data['message_count'] = 0
+    # Es crucial inicializar user_data
+    if 'chat_history' not in context.user_data:
+        context.user_data['chat_history'] = []
+        context.user_data['message_count'] = 0
     
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
@@ -85,6 +87,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Maneja mensajes de texto, guarda el historial de chat y genera la respuesta.
     """
     
+    # Aseguramos que las claves existan
     chat_history = context.user_data.get('chat_history', [])
     message_count = context.user_data.get('message_count', 0)
     
@@ -103,6 +106,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Ejecutamos la llamada síncrona de Gemini en el pool de hilos
+        # Esto es seguro porque el ThreadPoolExecutor maneja la ejecución bloqueante
         reply = await context.application.loop.run_in_executor(
             executor, 
             generate_response_sync, 
@@ -118,7 +122,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     # 5. Enviar respuesta principal
     try:
-        # Esta línea DEBE ser estable ahora que el ThreadPool la maneja correctamente.
+        # Esta llamada es asíncrona y corre dentro del loop de PTB, lo que es seguro.
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=reply
@@ -163,28 +167,10 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # ==========================
-# WEBHOOK PARA RAILWAY (FLASK) - Versión Sencilla y Estable
+# WEBHOOK PARA RAILWAY (FLASK) - Versión Final Simplificada
 # ==========================
 app = Flask(__name__)
 webhook_set = False
-
-# **Función de utilidad para ejecutar el proceso asíncrono en un thread**
-def process_update_async(update):
-    """Ejecuta el proceso asíncrono de Telegram en un nuevo event loop temporal y estable."""
-    try:
-        # Se establece un nuevo loop para cada thread de worker, pero no se cierra
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # La forma más simple de ejecutar el proceso del PTB
-        loop.run_until_complete(application.process_update(update))
-        
-        # logging.info("✅ Procesamiento de actualización completado en el ThreadPool.")
-        # No se llama a loop.close() para evitar el RuntimeError
-        
-    except Exception as e:
-        logger.error(f"❌ Error crítico en el ThreadPool al procesar la actualización: {e}")
-
 
 # **Inicialización: Solo seteo de Webhook y arranque del Application**
 async def setup_webhook():
@@ -193,6 +179,8 @@ async def setup_webhook():
     try:
         await application.initialize()
         webhook_url = f"https://{RAILWAY_URL}/{TOKEN}"
+        
+        # El comando 'set_webhook' se ejecuta primero para asegurar la conexión.
         await application.bot.set_webhook(webhook_url)
         
         # Iniciar las tareas internas del PTB (handlers, etc.) para que el contexto esté listo
@@ -213,9 +201,11 @@ except Exception as e:
 
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook(): 
-    """Maneja las actualizaciones de Telegram recibidas por el webhook."""
-    
-    logger.info("🟢 Webhook recibido de Telegram. Delegando a ThreadPool.")
+    """
+    Maneja las actualizaciones de Telegram recibidas por el webhook.
+    Usa el método recomendado de la librería: poner la actualización en la cola de PTB.
+    """
+    logger.info("🟢 Webhook recibido de Telegram. Enviando a cola de procesamiento de PTB.")
     
     if not webhook_set:
         logger.error("❌ Recibido webhook, pero la inicialización falló o no se completó.")
@@ -225,8 +215,9 @@ def webhook():
         json_update = request.get_json(force=True)
         update = Update.de_json(json_update, application.bot)
         
-        # FIX FINAL: Delegar la ejecución asíncrona al ThreadPoolExecutor
-        executor.submit(process_update_async, update)
+        # FIX FINAL: Enviar la Update a la cola (Queue) de la aplicación de PTB. 
+        # Esto delega el manejo del loop asíncrono al sistema interno de PTB.
+        application.process_update(update) # Este método en el contexto de webhook no necesita 'await' o 'submit'
         
         # Retornar OK inmediatamente.
         return "OK", 200
